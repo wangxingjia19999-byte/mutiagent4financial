@@ -33,21 +33,40 @@ class FinanceKnowledgeRetriever:
         self._vector_store = vector_store
         return vector_store
 
-    def retrieve(self, query: str, top_k: int = 4) -> str:
+    @staticmethod
+    def _match_symbol(metadata: dict, ts_code: str | None) -> bool:
+        if not ts_code:
+            return True
+
+        symbols_text = str(metadata.get("symbols_text", "ALL")).upper()
+        if symbols_text == "ALL":
+            return True
+
+        target = ts_code.strip().upper()
+        allowed = {s.strip() for s in symbols_text.split("|") if s.strip()}
+        return target in allowed
+
+    def retrieve(self, query: str, top_k: int = 4, ts_code: str | None = None) -> str:
         if not self.settings.rag_enable:
             return ""
 
         try:
             vector_store = self._ensure_vector_store()
-            docs = vector_store.similarity_search(query, k=top_k)
+            candidate_k = max(top_k * 4, top_k)
+            docs = vector_store.similarity_search(query, k=candidate_k)
         except Exception:
             return ""
 
         if not docs:
             return ""
 
+        filtered_docs = [doc for doc in docs if self._match_symbol(doc.metadata, ts_code)]
+        final_docs = filtered_docs[:top_k] if filtered_docs else docs[:top_k]
+        if not final_docs:
+            return ""
+
         blocks: list[str] = []
-        for idx, doc in enumerate(docs, start=1):
+        for idx, doc in enumerate(final_docs, start=1):
             source = doc.metadata.get("source", "unknown")
             blocks.append(f"[参考{idx}] 来源: {source}\n{doc.page_content}")
         return "\n\n".join(blocks)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 from io import BytesIO
 from typing import Any
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -11,8 +12,11 @@ from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from .base_agent import BaseAgent
-from .retriever import FinanceKnowledgeRetriever
 from .stock_data import TushareClient
+
+
+if TYPE_CHECKING:
+    from .retriever import FinanceKnowledgeRetriever
 
 
 class VisualFusionState(TypedDict, total=False):
@@ -33,10 +37,18 @@ class VisualStockAgent(BaseAgent):
         self._tushare_client: TushareClient | None = None
         self._tushare_token = tushare_token or self.settings.tushare_token
         self._retriever: FinanceKnowledgeRetriever | None = None
+        self._retriever_load_error: str | None = None
 
     def get_retriever(self) -> FinanceKnowledgeRetriever:
         if self._retriever is None:
-            self._retriever = FinanceKnowledgeRetriever(self.settings)
+            try:
+                from .retriever import FinanceKnowledgeRetriever as _FinanceKnowledgeRetriever
+
+                self._retriever = _FinanceKnowledgeRetriever(self.settings)
+                self._retriever_load_error = None
+            except Exception as exc:
+                self._retriever_load_error = str(exc)
+                raise
         return self._retriever
 
     def get_tushare_client(self) -> TushareClient:
@@ -86,7 +98,14 @@ class VisualStockAgent(BaseAgent):
             f"A股 {ts_code} 技术面 估值面 风险面 交易策略。"
             f"参考行情摘要: {snapshot}"
         )
-        retrieved_context = self.get_retriever().retrieve(query=query, top_k=max(1, rag_top_k))
+        try:
+            retrieved_context = self.get_retriever().retrieve(
+                query=query,
+                top_k=max(1, rag_top_k),
+                ts_code=ts_code,
+            )
+        except Exception:
+            retrieved_context = ""
         return {"retrieved_context": retrieved_context}
 
     def _invoke_specialist(
@@ -214,6 +233,23 @@ class VisualStockAgent(BaseAgent):
     @staticmethod
     def _prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
         frame = df.copy()
+
+        if "close" not in frame.columns:
+            for alt in ["close_basic", "close_x", "close_y"]:
+                if alt in frame.columns:
+                    frame["close"] = frame[alt]
+                    break
+        if "vol" not in frame.columns:
+            for alt in ["vol_basic", "vol_x", "vol_y"]:
+                if alt in frame.columns:
+                    frame["vol"] = frame[alt]
+                    break
+
+        required_cols = ["trade_date", "close", "vol"]
+        missing = [col for col in required_cols if col not in frame.columns]
+        if missing:
+            raise ValueError(f"行情数据缺少关键字段: {', '.join(missing)}，当前字段: {list(frame.columns)}")
+
         frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d")
         frame = frame.sort_values("trade_date", ascending=True)
 

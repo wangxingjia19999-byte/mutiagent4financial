@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Iterable
 
 from langchain_chroma import Chroma
@@ -86,6 +87,35 @@ def _chunk_text(text: str, chunk_size: int = 900, overlap: int = 120) -> list[st
     return chunks
 
 
+def _normalize_symbol(symbol: str) -> str:
+    return symbol.strip().upper()
+
+
+def _extract_symbols(path: Path, text: str) -> list[str]:
+    symbols: set[str] = set()
+
+    for match in re.findall(r"\b\d{6}\.(?:SZ|SH|BJ)\b", path.name.upper()):
+        symbols.add(_normalize_symbol(match))
+
+    head = text[:2000]
+    for line in head.splitlines():
+        striped = line.strip()
+        lower = striped.lower()
+        if lower.startswith("symbols:") or striped.startswith("股票代码:"):
+            _, value = striped.split(":", 1)
+            for token in re.split(r"[,，;；\s]+", value):
+                normalized = _normalize_symbol(token)
+                if re.fullmatch(r"\d{6}\.(?:SZ|SH|BJ)", normalized):
+                    symbols.add(normalized)
+
+    for match in re.findall(r"\b\d{6}\.(?:SZ|SH|BJ)\b", head.upper()):
+        symbols.add(_normalize_symbol(match))
+
+    if not symbols:
+        return ["ALL"]
+    return sorted(symbols)
+
+
 def _build_documents(knowledge_dir: Path) -> list[Document]:
     docs: list[Document] = []
     for path in _iter_knowledge_files(knowledge_dir):
@@ -93,6 +123,8 @@ def _build_documents(knowledge_dir: Path) -> list[Document]:
         if not text:
             continue
         rel = str(path.relative_to(_project_root()))
+        symbols = _extract_symbols(path, text)
+        symbols_text = "|".join(symbols)
         for idx, chunk in enumerate(_chunk_text(text)):
             docs.append(
                 Document(
@@ -100,6 +132,7 @@ def _build_documents(knowledge_dir: Path) -> list[Document]:
                     metadata={
                         "source": rel,
                         "chunk_index": idx,
+                        "symbols_text": symbols_text,
                     },
                 )
             )

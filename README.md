@@ -50,7 +50,30 @@ PYTHONPATH=src python examples/run_quant_agent.py
 
 # Tushare 拉取 A 股数据后交给智能体分析
 PYTHONPATH=src python examples/run_quant_agent_with_tushare.py
+
+# 财报 + 新闻融合分析（自动拉取股票相关新闻）
+PYTHONPATH=src python examples/run_financial_news_agent.py
+
+# 总调智能体：融合看图看线 + 财报新闻，给出最终投资判断
+PYTHONPATH=src python examples/run_investment_decision_agent.py
+
+# 交互式输入：支持股票代码 + 自定义提示词
+
+支持两种股票代码输入方式：
+- 仅数字：如 `000001`（程序会询问是深圳 SZ 还是上海 SH）
+- 完整格式：如 `000001.SZ` 或 `600519.SH`
+
+日期默认为：前 30 天 ~ 当前日期（自动计算）
+
+```bash
+PYTHONPATH=src python examples/run_interactive_agent.py
 ```
+
+运行后按提示输入：
+1. 选择分析模式（总调/看图看线/财报新闻）
+2. 输入股票代码（支持数字或完整格式）
+3. 日期范围（默认前30天～今天，可自定义）
+4. 可选：输入自定义分析提示词
 
 ## Tushare 数据获取
 
@@ -69,6 +92,44 @@ PYTHONPATH=src python examples/run_quant_agent_with_tushare.py
 1) 使用 Tushare 拉取 `ts_code` 的日线数据
 2) 生成市场快照
 3) 调用量化智能体输出结构化建议
+
+## 财报新闻分析智能体（新增）
+
+已新增 `FinancialNewsAgent`：`src/lianghua_agents/financial_news_agent.py`
+
+- 输入：`ts_code` + 日期区间
+- 自动流程：
+	1) 拉取财报指标（`fina_indicator`）并生成财报摘要
+	2) 自动拉取股票相关新闻（`news` + `major_news`）
+	3) 对新闻按股票代码/简称做相关性过滤
+	4) 融合财报与事件进行基本面判断
+
+可直接调用：
+
+- Python: `analyze_stock_with_news_reports(ts_code, start_date, end_date, ...)`
+- MCP: `analyze_stock_fundamental_news(ts_code, ...)`
+
+如需只取新闻数据，可用：
+
+- MCP: `get_stock_news(ts_code, start_date, end_date, limit)`
+
+## 总调投资决策智能体（新增）
+
+已新增 `InvestmentDecisionAgent`：`src/lianghua_agents/investment_decision_agent.py`
+
+- 融合来源：
+	1) `VisualStockAgent`（看图看线/技术面/风控面）
+	2) `FinancialNewsAgent`（财报指标+新闻事件）
+- 最终输出：
+	- 是否可投资（可投资/谨慎观察/暂不投资）
+	- 综合评分（0-100）
+	- 共识与冲突点
+	- 风险清单与执行建议
+
+可直接调用：
+
+- Python: `analyze_stock_for_investment(ts_code, start_date, end_date, ...)`
+- MCP: `analyze_stock_investment_decision(ts_code, ...)`
 
 ## 看图股票智能体（输入股票代码）
 
@@ -123,14 +184,31 @@ python examples/build_rag_index.py
 
 4. 分析时自动检索并注入到多智能体流程。
 
+### 按股票代码过滤知识源
+
+系统会按 `ts_code` 过滤检索结果（例如 `000001.SZ`）：
+
+- 若文档命中对应股票代码，则优先返回该文档分块
+- 若未命中，则回退到通用文档（`ALL`）
+
+给知识文档打标的两种方式：
+
+1. 文件名包含股票代码，例如：`knowledge/000001.SZ_strategy.md`
+2. 文档头部增加：`symbols: 000001.SZ, 600519.SH`
+
+未标注任何代码的文档会被视为通用文档（`ALL`）。
+
 ## MCP 封装（已完成）
 
-已新增 MCP Server：`src/lianghua_agents/mcp_server.py`，提供 3 个工具：
+已新增 MCP Server：`src/lianghua_agents/mcp_server.py`，提供以下工具：
 
 - `get_stock_basic(exchange, list_status, limit)`
 - `get_stock_daily(ts_code, start_date, end_date, limit)`
 - `analyze_stock(ts_code, start_date, end_date, limit, strategy)`
 - `analyze_stock_visual(ts_code, start_date, end_date, limit)`
+- `get_stock_news(ts_code, start_date, end_date, limit)`
+- `analyze_stock_fundamental_news(ts_code, start_date, end_date, news_limit, finance_limit, horizon)`
+- `analyze_stock_investment_decision(ts_code, start_date, end_date, price_limit, news_limit, finance_limit, use_rag, rag_top_k, horizon, risk_level)`
 
 ### 在 conda `wxj` 环境运行
 
