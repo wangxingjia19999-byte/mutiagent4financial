@@ -91,6 +91,8 @@ def analyze_stock_visual(
     start_date: str | None = None,
     end_date: str | None = None,
     limit: int = 120,
+    use_rag: bool = True,
+    rag_top_k: int = 4,
 ) -> str:
     """多智能体融合分析：技术面+估值面+风控面，输出统一交易信号。"""
     agent = _get_visual_agent()
@@ -99,6 +101,8 @@ def analyze_stock_visual(
         start_date=start_date,
         end_date=end_date,
         limit=limit,
+        use_rag=use_rag,
+        rag_top_k=rag_top_k,
     )
 
 

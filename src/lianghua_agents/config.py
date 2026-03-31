@@ -15,6 +15,10 @@ class AgentSettings:
     site_url: str | None = None
     app_name: str | None = None
     tushare_token: str | None = None
+    rag_enable: bool = True
+    rag_knowledge_dir: str = "knowledge"
+    rag_chroma_dir: str = ".chroma"
+    embedding_model: str = "text-embedding-3-small"
     temperature: float = 0.2
 
     @classmethod
@@ -30,4 +34,8 @@ class AgentSettings:
             site_url=os.getenv("OPENROUTER_SITE_URL"),
             app_name=os.getenv("OPENROUTER_APP_NAME"),
             tushare_token=os.getenv("TUSHARE_TOKEN"),
+            rag_enable=os.getenv("RAG_ENABLE", "true").strip().lower() in {"1", "true", "yes", "on"},
+            rag_knowledge_dir=os.getenv("RAG_KNOWLEDGE_DIR", "knowledge"),
+            rag_chroma_dir=os.getenv("RAG_CHROMA_DIR", ".chroma"),
+            embedding_model=os.getenv("OPENROUTER_EMBEDDING_MODEL", "text-embedding-3-small"),
         )

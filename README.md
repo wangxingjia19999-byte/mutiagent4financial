@@ -89,6 +89,40 @@ PYTHONPATH=src python examples/run_quant_agent_with_tushare.py
 python examples/run_visual_stock_agent.py
 ```
 
+## RAG（检索增强）已接入
+
+已新增：`src/lianghua_agents/retriever.py`
+
+- 检索位置：在 `VisualStockAgent` 的 LangGraph 中新增 `retrieve_context` 节点，位于三个子智能体之前。
+- 传递方式：检索结果写入状态 `retrieved_context`，技术/估值/风控子智能体共享使用。
+- 知识库目录：`knowledge/`（已提供示例文件 `knowledge/stock_analysis_rules.md`）
+
+可调参数：
+
+- Python 调用：`analyze_stock(..., use_rag=True, rag_top_k=4)`
+- MCP 调用：`analyze_stock_visual(..., use_rag=true, rag_top_k=4)`
+
+说明：
+
+- 当知识库为空、向量检索失败或未配置好 embedding 时，系统会自动降级，不影响主流程执行。
+
+### 如何做“切分 + 存入”
+
+1. 把知识文档放到 `knowledge/`（支持 `.md`、`.txt`）
+2. 运行索引构建：
+
+```bash
+python examples/build_rag_index.py
+```
+
+3. 系统会自动：
+
+- 对文档做分块切分（默认 `chunk_size=900`, `overlap=120`）
+- 计算文件哈希，判断是否需要重建
+- 将分块向量写入 Chroma（目录默认 `.chroma/`）
+
+4. 分析时自动检索并注入到多智能体流程。
+
 ## MCP 封装（已完成）
 
 已新增 MCP Server：`src/lianghua_agents/mcp_server.py`，提供 3 个工具：
