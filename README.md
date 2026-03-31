@@ -45,9 +45,46 @@ cp .env.example .env
 
 3. 运行示例
 
-```bash
-PYTHONPATH=src python examples/run_quant_agent.py
+### 推荐方式：CLI 模式
 
+#### 对话模式（新增）- 直接输入提示词交互
+```bash
+# 进入对话模式，连续输入多个分析需求
+PYTHONPATH=src python examples/cli.py chat
+
+# 也可以指定股票代码，跳过首次询问
+PYTHONPATH=src python examples/cli.py chat -s 000001
+```
+
+对话模式说明：
+- 输入任意文本作为分析提示词
+- 输入 `help` 显示命令
+- 输入 `exit` 退出
+
+#### 参数分析模式
+```bash
+# 交互模式（询问所有参数）
+PYTHONPATH=src python examples/cli.py analyze -i
+
+# 参数模式（指定参数）
+PYTHONPATH=src python examples/cli.py analyze -s 000001 -m decision
+
+# 总调投资决策（默认模式）
+PYTHONPATH=src python examples/cli.py analyze -s 000001
+
+# 看图看线分析
+PYTHONPATH=src python examples/cli.py analyze -s 000001 -m technical
+
+# 财报新闻分析（可选日期）
+PYTHONPATH=src python examples/cli.py analyze -s 000001 -m fundamental --start-date 20260301 --end-date 20260331
+
+# 模拟盘执行（分析 + 自动按信号下单）
+PYTHONPATH=src python examples/cli.py paper -s 000001 --risk-level 中等
+```
+
+### 旧模式（仍然可用）
+
+```bash
 # Tushare 拉取 A 股数据后交给智能体分析
 PYTHONPATH=src python examples/run_quant_agent_with_tushare.py
 
@@ -57,23 +94,12 @@ PYTHONPATH=src python examples/run_financial_news_agent.py
 # 总调智能体：融合看图看线 + 财报新闻，给出最终投资判断
 PYTHONPATH=src python examples/run_investment_decision_agent.py
 
-# 交互式输入：支持股票代码 + 自定义提示词
+# 模拟盘示例：总调决策 + 本地账户执行
+PYTHONPATH=src python examples/run_paper_trading_agent.py
 
-支持两种股票代码输入方式：
-- 仅数字：如 `000001`（程序会询问是深圳 SZ 还是上海 SH）
-- 完整格式：如 `000001.SZ` 或 `600519.SH`
-
-日期默认为：前 30 天 ~ 当前日期（自动计算）
-
-```bash
+# 简单交互式输入：支持股票代码 + 自定义提示词
 PYTHONPATH=src python examples/run_interactive_agent.py
 ```
-
-运行后按提示输入：
-1. 选择分析模式（总调/看图看线/财报新闻）
-2. 输入股票代码（支持数字或完整格式）
-3. 日期范围（默认前30天～今天，可自定义）
-4. 可选：输入自定义分析提示词
 
 ## Tushare 数据获取
 
@@ -113,7 +139,54 @@ PYTHONPATH=src python examples/run_interactive_agent.py
 
 - MCP: `get_stock_news(ts_code, start_date, end_date, limit)`
 
-## 总调投资决策智能体（新增）
+## CLI 命令行工具（推荐）
+
+已新增专业 CLI 封装：`src/lianghua_agents/cli.py`，使用 `click` 和 `rich` 实现。
+
+### CLI 参数说明
+
+- `-s, --stock-code`：股票代码（如 `000001` 或 `000001.SZ`）
+- `-m, --mode`：分析模式
+  - `decision`：总调投资决策（融合技术+财报+新闻）【默认】
+  - `technical`：看图看线（技术面分析）
+  - `fundamental`：财报新闻（基本面+事件）
+- `--start-date`：开始日期（YYYYMMDD，默认30天前）
+- `--end-date`：结束日期（YYYYMMDD，默认今天）
+- `-p, --custom-prompt`：自定义分析提示词
+- `-i, --interactive`：交互模式
+
+### 模拟盘（Paper Trading）
+
+已新增：`src/lianghua_agents/paper_trading.py`
+
+功能：
+
+- 本地账户持久化（默认 `.paper_account.json`）
+- 解析 `InvestmentDecisionAgent` 输出（可投资/谨慎观察/暂不投资）转为 BUY/HOLD/SELL
+- 风险偏好驱动目标仓位（保守/中等/积极）
+- 简单止损（默认回撤 8% 触发清仓）
+
+CLI 用法：
+
+```bash
+PYTHONPATH=src python examples/cli.py paper -s 000001 --risk-level 中等
+```
+
+可选参数：
+
+- `--state-path`：账户状态文件路径（默认 `.paper_account.json`）
+- `--initial-cash`：首次初始化资金（默认 1000000）
+- `-p, --custom-prompt`：附加给总调智能体的提示词
+
+### CLI 输出特性
+
+- 彩色美化输出（使用 Rich 库）
+- 进度指示（分析过程显示加载动画）
+- 结果面板（结构化展示分析结论）
+
+---
+
+## 旧交互模式（仍然可用）
 
 已新增 `InvestmentDecisionAgent`：`src/lianghua_agents/investment_decision_agent.py`
 
