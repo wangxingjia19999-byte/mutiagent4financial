@@ -41,6 +41,44 @@ class TushareClient:
         daily = daily.sort_values("trade_date", ascending=False)
         return daily.head(limit)
 
+    def get_daily_basic(
+        self,
+        ts_code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 30,
+    ) -> pd.DataFrame:
+        daily_basic = self.pro.daily_basic(ts_code=ts_code, start_date=start_date, end_date=end_date)
+        if daily_basic.empty:
+            return daily_basic
+
+        daily_basic = daily_basic.sort_values("trade_date", ascending=False)
+        return daily_basic.head(limit)
+
+    def get_merged_daily_data(
+        self,
+        ts_code: str,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        limit: int = 120,
+    ) -> pd.DataFrame:
+        daily = self.get_daily(ts_code=ts_code, start_date=start_date, end_date=end_date, limit=limit)
+        if daily.empty:
+            return daily
+
+        daily_basic = self.get_daily_basic(
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+        )
+        if daily_basic.empty:
+            return daily
+
+        merged = pd.merge(daily, daily_basic, on=["ts_code", "trade_date"], how="left")
+        merged = merged.sort_values("trade_date", ascending=False)
+        return merged
+
     def build_market_snapshot(
         self,
         ts_code: str,

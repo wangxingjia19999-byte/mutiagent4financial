@@ -70,6 +70,25 @@ PYTHONPATH=src python examples/run_quant_agent_with_tushare.py
 2) 生成市场快照
 3) 调用量化智能体输出结构化建议
 
+## 看图股票智能体（输入股票代码）
+
+已新增 `VisualStockAgent`：`src/lianghua_agents/visual_stock_agent.py`
+
+- 输入：`ts_code`（如 `000001.SZ`）
+- 自动流程（多智能体融合）：
+	1) 调用 Tushare 获取日线 + daily_basic
+	2) 生成价格/均线/成交量图
+	3) 技术面子智能体分析（看图）
+	4) 估值面子智能体分析
+	5) 风控面子智能体分析
+	6) 融合子智能体输出统一信号（看多/中性/看空）
+
+运行示例：
+
+```bash
+python examples/run_visual_stock_agent.py
+```
+
 ## MCP 封装（已完成）
 
 已新增 MCP Server：`src/lianghua_agents/mcp_server.py`，提供 3 个工具：
@@ -77,6 +96,7 @@ PYTHONPATH=src python examples/run_quant_agent_with_tushare.py
 - `get_stock_basic(exchange, list_status, limit)`
 - `get_stock_daily(ts_code, start_date, end_date, limit)`
 - `analyze_stock(ts_code, start_date, end_date, limit, strategy)`
+- `analyze_stock_visual(ts_code, start_date, end_date, limit)`
 
 ### 在 conda `wxj` 环境运行
 

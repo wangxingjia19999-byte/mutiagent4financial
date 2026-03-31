@@ -8,20 +8,18 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from lianghua_agents.quant_agent import QuantResearchAgent
+from lianghua_agents.visual_stock_agent import VisualStockAgent
 
 
 def main() -> None:
     load_dotenv()
+    agent = VisualStockAgent()
 
-    agent = QuantResearchAgent()
-
-    result = agent.analyze_stock_with_tushare(
+    result = agent.analyze_stock(
         ts_code="000001.SZ",
-        start_date="20260101",
+        start_date="20251001",
         end_date="20260331",
-        limit=30,
-        context={"strategy": "日线趋势+回撤控制"},
+        limit=120,
     )
     print(result)
 

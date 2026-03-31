@@ -5,6 +5,7 @@ from mcp.server.fastmcp import FastMCP
 
 from .quant_agent import QuantResearchAgent
 from .stock_data import TushareClient
+from .visual_stock_agent import VisualStockAgent
 
 
 load_dotenv()
@@ -13,6 +14,7 @@ mcp = FastMCP("lianghua-quant-agent")
 
 _tushare_client: TushareClient | None = None
 _quant_agent: QuantResearchAgent | None = None
+_visual_agent: VisualStockAgent | None = None
 
 
 def _get_tushare_client() -> TushareClient:
@@ -27,6 +29,13 @@ def _get_quant_agent() -> QuantResearchAgent:
     if _quant_agent is None:
         _quant_agent = QuantResearchAgent()
     return _quant_agent
+
+
+def _get_visual_agent() -> VisualStockAgent:
+    global _visual_agent
+    if _visual_agent is None:
+        _visual_agent = VisualStockAgent()
+    return _visual_agent
 
 
 @mcp.tool()
@@ -73,6 +82,23 @@ def analyze_stock(
         end_date=end_date,
         limit=limit,
         context={"strategy": strategy},
+    )
+
+
+@mcp.tool()
+def analyze_stock_visual(
+    ts_code: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 120,
+) -> str:
+    """多智能体融合分析：技术面+估值面+风控面，输出统一交易信号。"""
+    agent = _get_visual_agent()
+    return agent.analyze_stock(
+        ts_code=ts_code,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
     )
 
 
