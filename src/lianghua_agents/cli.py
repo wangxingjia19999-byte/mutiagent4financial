@@ -14,20 +14,18 @@ from rich.live import Live
 from rich.spinner import Spinner
 
 try:
-    from .financial_news_agent import FinancialNewsAgent
     from .investment_decision_agent import InvestmentDecisionAgent
+    from .multi_agent_system import WorkflowMode, WorkflowRequest, get_multi_agent_system
     from .paper_trading import PaperTradingEngine
-    from .visual_stock_agent import VisualStockAgent
 except ImportError:
     current_dir = Path(__file__).resolve().parent
     src_dir = current_dir.parent
     if str(src_dir) not in sys.path:
         sys.path.insert(0, str(src_dir))
 
-    from lianghua_agents.financial_news_agent import FinancialNewsAgent
     from lianghua_agents.investment_decision_agent import InvestmentDecisionAgent
+    from lianghua_agents.multi_agent_system import WorkflowMode, WorkflowRequest, get_multi_agent_system
     from lianghua_agents.paper_trading import PaperTradingEngine
-    from lianghua_agents.visual_stock_agent import VisualStockAgent
 
 console = Console()
 
@@ -390,17 +388,19 @@ def _run_technical(ts_code: str, start_date: str, end_date: str, context: dict) 
         border_style="yellow"
     ))
     
-    agent = VisualStockAgent()
-    
     with console.status("[bold green]正在分析行情数据...", spinner="dots"):
-        result = agent.analyze_stock(
+        request = WorkflowRequest(
+            mode=WorkflowMode.TECHNICAL,
             ts_code=ts_code,
+            user_prompt=context.get("custom_prompt", "请做技术面分析"),
             start_date=start_date,
             end_date=end_date,
-            limit=120,
+            horizon=context.get("horizon", "1-3个月"),
+            risk_level=context.get("risk_level", "中等"),
             use_rag=context.get("use_rag", True),
             rag_top_k=context.get("rag_top_k", 4),
         )
+        result = get_multi_agent_system().run(request).get_result("visual") or "未返回技术分析结果"
     
     console.print(Panel(result, title="分析结果", border_style="green"))
 
@@ -414,17 +414,19 @@ def _run_fundamental(ts_code: str, start_date: str, end_date: str, context: dict
         border_style="magenta"
     ))
     
-    agent = FinancialNewsAgent()
-    
     with console.status("[bold green]正在分析财报和新闻...", spinner="dots"):
-        result = agent.analyze_stock_with_news_reports(
+        request = WorkflowRequest(
+            mode=WorkflowMode.FUNDAMENTAL,
             ts_code=ts_code,
+            user_prompt=context.get("custom_prompt", "请做基本面分析"),
             start_date=start_date,
             end_date=end_date,
+            horizon=context.get("horizon", "1-3个月"),
+            risk_level=context.get("risk_level", "中等"),
             news_limit=12,
             finance_limit=8,
-            context=context,
         )
+        result = get_multi_agent_system().run(request).get_result("news") or "未返回基本面分析结果"
     
     console.print(Panel(result, title="分析结果", border_style="magenta"))
 
@@ -438,20 +440,23 @@ def _run_decision(ts_code: str, start_date: str, end_date: str, context: dict) -
         border_style="cyan"
     ))
     
-    agent = InvestmentDecisionAgent()
-    
     with console.status("[bold green]正在融合分析...", spinner="dots"):
-        result = agent.analyze_stock_for_investment(
+        request = WorkflowRequest(
+            mode=WorkflowMode.COMPREHENSIVE,
             ts_code=ts_code,
+            user_prompt=context.get("custom_prompt", "请给出综合投资决策"),
             start_date=start_date,
             end_date=end_date,
+            horizon=context.get("horizon", "1-3个月"),
+            risk_level=context.get("risk_level", "中等"),
             price_limit=120,
             news_limit=12,
             finance_limit=8,
             use_rag=context.get("use_rag", True),
             rag_top_k=context.get("rag_top_k", 4),
-            context=context,
         )
+        workflow_result = get_multi_agent_system().run(request)
+        result = workflow_result.get_result("decision") or "未返回综合决策结果"
     
     console.print(Panel(result, title="投资决策结果", border_style="cyan"))
 

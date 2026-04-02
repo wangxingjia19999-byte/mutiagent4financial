@@ -82,6 +82,163 @@ PYTHONPATH=src python examples/cli.py analyze -s 000001 -m fundamental --start-d
 PYTHONPATH=src python examples/cli.py paper -s 000001 --risk-level 中等
 ```
 
+## ⚡ 最快开始（极简模式）
+
+**你要的就是这个！只需输入提示词，其他一切自动处理。**
+
+### 方式 1: 交互窗口（最简单）
+
+```bash
+PYTHONPATH=src python examples/simple_analyze.py
+```
+
+然后：
+1. 输入股票代码（或按 Enter 用默认）
+2. 输入你的问题
+3. 系统自动分析并显示结果
+
+```
+>>> 这支股票值得投资吗？
+[自动分析...]
+【VISUAL】技术面分析...
+【NEWS】基本面分析...
+【DECISION】投资建议...
+```
+
+### 方式 2: 快速命令
+
+```bash
+PYTHONPATH=src python examples/simple_analyze.py "这支股票怎么样？" -s 000001
+```
+
+### 方式 3: 代码
+
+```python
+from lianghua_agents.simple_api import analyze_quick
+result = analyze_quick("这支股票值得投资吗？")
+print(result)
+```
+
+✨ **系统自动处理**:
+- ✅ 日期范围（过去 30 天）
+- ✅ 分析模式（综合分析）
+- ✅ 所有参数设置
+- ✅ 多 Agent 协作
+
+详见: [SIMPLE_USAGE_GUIDE.md](SIMPLE_USAGE_GUIDE.md)
+
+---
+
+## ✨ 新增：统一 Agent 系统（用于高级定制）
+
+lianghua 现在支持一个**完整的统一 Agent 管理系统**，解决了之前 Agent 各自为政的问题！
+
+### 核心特性
+
+- ✅ **集中 Prompt 管理** - 所有 Agent 的提示词在一个地方管理
+- ✅ **统一工作流引擎** - 支持单 Agent / 技术面 / 基本面 / 综合分析等多种模式
+- ✅ **标准化 Agent 编排** - 清晰的多 Agent 协作框架
+- ✅ **完整的输入/输出规范** - 统一的数据格式
+
+### 快速开始
+
+#### 第 1 步: 验证系统框架 ✅
+
+```bash
+# 运行本地验证（不需要 API 调用）
+PYTHONPATH=src python examples/verify_local.py
+
+# 应该看到所有测试都通过 ✓
+```
+
+#### 第 2 步: 诊断/修复 API 问题 (如果需要)
+
+```bash
+# 如果遇到 API 403 错误，运行诊断工具
+PYTHONPATH=src python examples/diagnose.py
+
+# 工具会自动检查和建议切换模型
+```
+
+#### 第 3 步: 运行演示程序 🚀
+
+```bash
+# 交互式演示，查看 Prompt Manager、各种分析模式
+PYTHONPATH=src python examples/run_unified_workflow.py
+
+# 推荐先选择: 1. Prompt Manager 演示（无需 API）
+```
+
+#### 第 4 步: 在代码中使用
+
+```python
+from lianghua_agents.multi_agent_system import (
+    WorkflowRequest,
+    WorkflowMode,
+	get_multi_agent_system,
+)
+
+# 创建分析请求
+request = WorkflowRequest(
+    mode=WorkflowMode.COMPREHENSIVE,  # 综合分析
+    ts_code="000001.SZ",
+    user_prompt="这支股票值得投资吗？",
+    start_date="20260201",
+    end_date="20260331",
+    horizon="1-3个月",
+    risk_level="中等",
+)
+
+# 运行并获取结果
+result = get_multi_agent_system().run(request)
+print(result.results)
+```
+
+### 支持的分析模式
+
+| 模式 | 说明 | Agent 组合 |
+|-----|------|-----------|
+| **SINGLE** | 单 Agent 分析 | 指定的单个 Agent |
+| **TECHNICAL** | 技术面分析 | VisualStockAgent |
+| **FUNDAMENTAL** | 基本面分析 | FinancialNewsAgent |
+| **COMPREHENSIVE** | 完整分析 | Visual + News + Decision |
+
+### 查看所有 Prompt
+
+```python
+from lianghua_agents.prompt_manager import PromptManager
+
+# 列出所有可用的 Agent Prompt
+for name in PromptManager.list_templates():
+    print(name)
+
+# 查看特定 Agent 的 Prompt
+prompt = PromptManager.render_system_prompt("investment_decision_agent")
+print(prompt)
+```
+
+### 🆘 遇到 API 错误？
+
+**错误信息**: `PermissionDeniedError: model not available in your region`
+
+**解决方案**: 
+
+```bash
+# 自动诊断和修复
+PYTHONPATH=src python examples/diagnose.py
+
+# 或查看完整指南
+# 文件: TROUBLESHOOTING.md
+```
+
+### 详细文档
+
+- **快速开始**: [UNIFIED_SYSTEM_QUICKSTART.md](UNIFIED_SYSTEM_QUICKSTART.md)
+- **完整架构**: [ARCHITECTURE.md](ARCHITECTURE.md)
+- **故障排查**: [TROUBLESHOOTING.md](TROUBLESHOOTING.md)
+
+---
+
 ### 旧模式（仍然可用）
 
 ```bash

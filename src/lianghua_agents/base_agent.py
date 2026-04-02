@@ -7,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
 from .config import AgentSettings
+from .prompt_manager import PromptManager
 
 
 class AgentState(TypedDict, total=False):
@@ -17,6 +18,13 @@ class AgentState(TypedDict, total=False):
 
 
 class BaseAgent:
+    """基础 Agent 类
+    
+    支持从 PromptManager 加载 prompt 模板，或者使用自定义 prompt
+    """
+    # 子类可以覆盖这个属性来指定使用的 prompt 模板
+    prompt_template_name: str | None = None
+
     def __init__(self, settings: AgentSettings | None = None, system_prompt: str | None = None):
         self.settings = settings or AgentSettings.from_env()
         self._system_prompt = system_prompt
@@ -39,8 +47,29 @@ class BaseAgent:
         )
 
     def get_system_prompt(self, context: dict[str, Any] | None = None) -> str:
+        """获取 system prompt
+        
+        优先级：
+        1. 自定义 system_prompt（通过 __init__ 传入）
+        2. PromptManager 中的模板（通过 prompt_template_name）
+        3. 默认 prompt
+        """
         if self._system_prompt:
             return self._system_prompt
+
+        # 如果指定了模板名称，从 PromptManager 获取
+        if self.prompt_template_name:
+            try:
+                context = context or {}
+                return PromptManager.render_system_prompt(
+                    self.prompt_template_name,
+                    horizon=context.get("horizon", "1-3个月"),
+                    risk_level=context.get("risk_level", "中等"),
+                    strategy=context.get("strategy", "趋势跟随 + 风险控制"),
+                )
+            except ValueError as e:
+                print(f"警告: 无法加载 prompt 模板 {self.prompt_template_name}: {e}")
+
         return "你是一个可靠的通用 AI 智能体，请根据输入完成高质量回答。"
 
     def build_messages(self, user_input: str, context: dict[str, Any] | None = None) -> list[BaseMessage]:
