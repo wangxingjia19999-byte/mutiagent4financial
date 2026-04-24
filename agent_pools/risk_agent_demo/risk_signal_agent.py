@@ -15,6 +15,13 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 
+
+def _llm_runtime_supported() -> bool:
+    if os.getenv("RISK_AGENT_DISABLE_LLM", "").lower() in {"1", "true", "yes"}:
+        return False
+    major, minor = sys.version_info[:2]
+    return (major, minor) < (3, 14)
+
 project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
@@ -132,12 +139,14 @@ def _run_risk_pipeline_impl(data: pd.DataFrame, market_returns: Any, metrics: Li
             if res['status'] == 'success': risk_res['var'] = res['var']
             
         sig_res = _generate_risk_signals(risk_res)
+        n_observations = int(len(returns))
         return {
             "status": "success",
             "risk_metrics": risk_res,
             "risk_signals": sig_res.get('risk_signals'),
             "overall_risk_level": sig_res.get('overall_risk_level'),
-            "risk_score": sig_res.get('risk_score')
+            "risk_score": sig_res.get('risk_score'),
+            "n_observations": n_observations
         }
     except Exception as e:
         return {"status": "error", "message": str(e)}
@@ -246,12 +255,36 @@ class RiskSignalAgent:
             'risk_metrics': risk_metrics
         }
         
+        if not _llm_runtime_supported():
+            print("INFO: LLM risk run disabled/incompatible runtime; using local risk pipeline.")
+            return _run_risk_pipeline_impl(
+                data=data,
+                market_returns=market_returns,
+                metrics=risk_metrics or ['volatility', 'var'],
+                processor=self.data_processor
+            )
+
         print("DEBUG: 🛡️ Requesting Risk Agent LLM...")
-        result = Runner.run_sync(self.agent, "Assess market risk.", context=context)
+        try:
+            Runner.run_sync(self.agent, "Assess market risk.", context=context)
+        except Exception as e:
+            print(f"Warning: LLM risk run failed, falling back to local risk pipeline: {e}")
+            local_result = _run_risk_pipeline_impl(
+                data=data,
+                market_returns=market_returns,
+                metrics=risk_metrics or ['volatility', 'var'],
+                processor=self.data_processor
+            )
+            return local_result
         
         if 'result' in context:
             return context['result']
-        return {'status': 'error', 'message': 'No result'}
+        return _run_risk_pipeline_impl(
+            data=data,
+            market_returns=market_returns,
+            metrics=risk_metrics or ['volatility', 'var'],
+            processor=self.data_processor
+        )
 
 if __name__ == "__main__":
     print("Risk Agent Initialized")
