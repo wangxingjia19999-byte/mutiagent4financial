@@ -1,13 +1,17 @@
 from pathlib import Path
+import runpy
 import sys
 
-ROOT = Path(__file__).resolve().parents[1]
-SRC = ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
 
-from lianghua_agent.main import main
+def main():
+    root = Path(__file__).resolve().parents[1]
+    target = root / "agent_pools" / "risk_agent_demo" / "example_usage.py"
+
+    if not target.exists():
+        raise FileNotFoundError(f"Demo entry not found: {target}")
+
+    runpy.run_path(str(target), run_name="__main__")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

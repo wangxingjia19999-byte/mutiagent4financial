@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import importlib
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -10,29 +11,28 @@ import logging
 import inspect
 from typing import Any, Dict, Optional, Callable, List, Union
 
+from agent_pools.openrouter_config import setup_openrouter_env, resolve_openrouter_model
+
+setup_openrouter_env()
+
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("Orchestrator")
 
 # Add agent paths to sys.path
 current_dir = Path(__file__).parent
-agent_pools_dir = current_dir.parent / "agent_pools"
+project_root = current_dir.parent
+agent_pools_dir = project_root / "agent_pools"
 
-sys.path.append(str(agent_pools_dir))
-sys.path.append(str(agent_pools_dir / "alpha_agent_pool"))
-sys.path.append(str(agent_pools_dir / "alpha_agent_demo"))
-sys.path.append(str(agent_pools_dir / "risk_agent_demo"))
-sys.path.append(str(agent_pools_dir / "portfolio_agent_demo"))
-sys.path.append(str(agent_pools_dir / "execution_agent_demo" / "execution_agent_demo"))
-sys.path.append(str(agent_pools_dir / "backtest_agent"))
+sys.path.append(str(project_root))
 
 # Import Agents
 try:
-    from alpha_signal_agent import AlphaSignalAgent
-    from risk_signal_agent import RiskSignalAgent
-    from portfolio_agent import PortfolioAgent
-    from execution_agent import ExecutionAgent
-    from backtest_agent import BacktestAgent
+    from agent_pools.alpha_agent_demo.alpha_signal_agent import AlphaSignalAgent
+    from agent_pools.risk_agent_demo.risk_signal_agent import RiskSignalAgent
+    from agent_pools.portfolio_agent_demo.portfolio_agent import PortfolioAgent
+    from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent import ExecutionAgent
+    from agent_pools.backtest_agent_pool.backtest_agent import BacktestAgent
 except ImportError as e:
     logger.error(f"Failed to import agents: {e}")
     sys.exit(1)
@@ -48,9 +48,9 @@ except ImportError:
 # Data Client
 # ------------------------------------------------------------------------------
 try:
-    from alpaca.data.historical import StockHistoricalDataClient
-    from alpaca.data.requests import StockBarsRequest
-    from alpaca.data.timeframe import TimeFrame
+    StockHistoricalDataClient = importlib.import_module("alpaca.data.historical").StockHistoricalDataClient
+    StockBarsRequest = importlib.import_module("alpaca.data.requests").StockBarsRequest
+    TimeFrame = importlib.import_module("alpaca.data.timeframe").TimeFrame
 except ImportError:
     logger.warning("alpaca-py not installed. Data fetching will be mocked.")
     StockHistoricalDataClient = None
@@ -63,15 +63,15 @@ class Orchestrator:
         self.api_key = os.getenv("ALPACA_API_KEY")
         self.secret_key = os.getenv("ALPACA_SECRET_KEY")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.openrouter_model = resolve_openrouter_model("openai/gpt-4o-mini")
         
         if not self.openai_api_key:
             logger.warning("OPENAI_API_KEY not found. Agents might fail.")
             
         # Initialize Sub-Agents
-        # Updated to use GPT-4o as requested
-        self.alpha_agent = AlphaSignalAgent(name="AlphaCore", model="gpt-4o")
-        self.risk_agent = RiskSignalAgent(name="RiskCore", model="gpt-4o")
-        self.portfolio_agent = PortfolioAgent(name="PortfolioCore", model="gpt-4o")
+        self.alpha_agent = AlphaSignalAgent(name="AlphaCore", model=self.openrouter_model)
+        self.risk_agent = RiskSignalAgent(name="RiskCore", model=self.openrouter_model)
+        self.portfolio_agent = PortfolioAgent(name="PortfolioCore", model=self.openrouter_model)
         
         self.execution_agent = ExecutionAgent(
             alpaca_api_key=self.api_key, 
