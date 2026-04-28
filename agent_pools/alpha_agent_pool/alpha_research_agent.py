@@ -10,8 +10,8 @@ from datetime import datetime
 import pandas as pd
 from pydantic import BaseModel
 
-# OpenAI Agents SDK imports (本地agents.py已重命名为local_agents.py)
-from agents import Agent, Runner, function_tool, RunContextWrapper
+# Local Agents SDK imports
+from local_agents import Agent, function_tool
 
 # 导入工具包
 from alpha_analysis_toolkit import AlphaAnalysisToolkit

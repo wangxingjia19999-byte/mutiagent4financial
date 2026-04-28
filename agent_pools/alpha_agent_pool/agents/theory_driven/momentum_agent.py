@@ -39,13 +39,13 @@ if project_root_for_import not in sys.path:
     sys.path.insert(0, project_root_for_import)
 
 try:
-    from agent_pools.openrouter_config import setup_openrouter_env, get_openai_client_kwargs, resolve_openrouter_model
-    setup_openrouter_env()
+    from agent_pools.poe_config import setup_poe_env, get_openai_client_kwargs, resolve_poe_model
+    setup_poe_env()
 except Exception:
     def get_openai_client_kwargs():
         return {"api_key": os.getenv("OPENAI_API_KEY")}
 
-    def resolve_openrouter_model(default_model: str = "openai/gpt-4o-mini"):
+    def resolve_poe_model(default_model: str = "openai/gpt-4o-mini"):
         return os.getenv("OPENAI_MODEL") or default_model
 
 # Load environment variables from .env file
@@ -663,7 +663,7 @@ class MomentumAgent:
                 logger.warning("OPENAI_API_KEY not found in environment")
                 return
             self.llm_client = AsyncOpenAI(**get_openai_client_kwargs())
-            self.llm_model = resolve_openrouter_model("openai/gpt-4o-mini")
+            self.llm_model = resolve_poe_model("openai/gpt-4o-mini")
             logger.info("✅ LLM client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize LLM client: {e}", exc_info=True)
@@ -1354,7 +1354,7 @@ Focus on intelligent adaptation and RL-style learning. Use the multi-timeframe a
             """
             
             response = await self.llm_client.chat.completions.create(
-                model=getattr(self, "llm_model", resolve_openrouter_model("openai/gpt-4o-mini")),
+                model=getattr(self, "llm_model", resolve_poe_model("openai/gpt-4o-mini")),
                 messages=[{"role": "user", "content": context}],
                 temperature=0.1,
                 max_tokens=500

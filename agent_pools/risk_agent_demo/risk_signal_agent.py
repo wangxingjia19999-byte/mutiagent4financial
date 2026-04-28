@@ -26,18 +26,19 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from agent_pools.openrouter_config import setup_openrouter_env, resolve_openrouter_model
+from agent_pools.poe_config import setup_poe_env, resolve_poe_model
 
-setup_openrouter_env()
+setup_poe_env()
 
 # Add parent directory to path for imports
 parent_dir = Path(__file__).parent.parent
 alpha_agent_pool_path = parent_dir / "alpha_agent_pool"
 
-# Import OpenAI Agents SDK
+# Import Local Agents SDK
 import nest_asyncio
 nest_asyncio.apply()
-from agents import Agent, Runner, function_tool, RunContextWrapper
+sys.path.append(str(alpha_agent_pool_path))
+from local_agents import Agent, function_tool
 
 # Import Qlib utilities
 try:
@@ -156,25 +157,25 @@ def _run_risk_pipeline_impl(data: pd.DataFrame, market_returns: Any, metrics: Li
 # ==============================
 
 @function_tool
-def run_risk_pipeline(ctx: RunContextWrapper[Any]) -> str:
+def run_risk_pipeline(ctx: dict) -> str:
     """Execute standard risk pipeline."""
     print("DEBUG: 🛡️ run_risk_pipeline (Macro) INVOKED")
     try:
-        data = ctx.context.get('data')
+        data = ctx.get('data')
         if data is None: return "Error: No data."
-        metrics = ctx.context.get('risk_metrics', ['volatility', 'var'])
+        metrics = ctx.get('risk_metrics', ['volatility', 'var'])
         result = _run_risk_pipeline_impl(data, None, metrics, None)
-        ctx.context['result'] = result
+        ctx['result'] = result
         return f"Risk analysis complete. Level: {result.get('overall_risk_level')}"
     except Exception as e:
         return f"Error: {e}"
 
 @function_tool
-def calculate_volatility_tool(ctx: RunContextWrapper[Any], window: int = 20) -> str:
+def calculate_volatility_tool(ctx: dict, window: int = 20) -> str:
     """Calculate volatility."""
     print("DEBUG: 🛡️ calculate_volatility_tool INVOKED")
     try:
-        data = ctx.context.get('data')
+        data = ctx.get('data')
         if data is None: return "Error: No data."
         # Calculate returns on the fly
         # Simplified: assume 'close' column
@@ -185,21 +186,21 @@ def calculate_volatility_tool(ctx: RunContextWrapper[Any], window: int = 20) -> 
             returns = data.groupby('date')['close'].mean().pct_change().dropna() if 'symbol' in data.columns else data['close'].pct_change().dropna()
             res = _calculate_volatility(returns, window)
             if res['status'] == 'success':
-                if 'risk_metrics' not in ctx.context: ctx.context['risk_metrics'] = {}
-                ctx.context['risk_metrics']['volatility'] = res['volatility']
+                if 'risk_metrics' not in ctx: ctx['risk_metrics'] = {}
+                ctx['risk_metrics']['volatility'] = res['volatility']
                 return f"Volatility calculated: {res['volatility']}"
         return "Error: Could not calculate."
     except Exception as e:
         return f"Error: {e}"
 
 @function_tool
-def submit_risk_assessment_tool(ctx: RunContextWrapper[Any]) -> str:
+def submit_risk_assessment_tool(ctx: dict) -> str:
     """Submit final risk assessment."""
     print("DEBUG: 🛡️ submit_risk_assessment_tool INVOKED")
     try:
-        metrics = ctx.context.get('risk_metrics', {})
+        metrics = ctx.get('risk_metrics', {})
         res = _generate_risk_signals(metrics)
-        ctx.context['result'] = res
+        ctx['result'] = res
         return "Risk assessment submitted."
     except Exception as e:
         return f"Error: {e}"
@@ -212,7 +213,7 @@ class RiskSignalAgent:
     def __init__(
         self,
         name: str = "RiskSignalAgent",
-        model: str = resolve_openrouter_model("openai/gpt-4o-mini"),
+        model: str = resolve_poe_model("openai/gpt-4o-mini"),
         qlib_config: Optional[QlibConfig] = None
     ):
         self.name = name
@@ -266,7 +267,7 @@ class RiskSignalAgent:
 
         print("DEBUG: 🛡️ Requesting Risk Agent LLM...")
         try:
-            Runner.run_sync(self.agent, "Assess market risk.", context=context)
+            self.agent.run("Assess market risk.", context=context, max_turns=5)
         except Exception as e:
             print(f"Warning: LLM risk run failed, falling back to local risk pipeline: {e}")
             local_result = _run_risk_pipeline_impl(

@@ -1,4 +1,4 @@
-from backtest_agent_pool.local_agents import Agent, ModelSettings, function_tool
+from agent_pools.backtest_agent_pool.local_agents import Agent, ModelSettings, function_tool
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta

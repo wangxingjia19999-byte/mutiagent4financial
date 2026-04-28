@@ -19,19 +19,19 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from agent_pools.openrouter_config import setup_openrouter_env, resolve_openrouter_model
+from agent_pools.poe_config import setup_poe_env, resolve_poe_model
 
-setup_openrouter_env()
+setup_poe_env()
 
 # Add parent directory to path for imports
 parent_dir = Path(__file__).parent.parent
 alpha_agent_pool_path = parent_dir / "alpha_agent_pool"
 sys.path.append(str(alpha_agent_pool_path))
 
-# Import OpenAI Agents SDK
+# Import Local Agents SDK
 import nest_asyncio
 nest_asyncio.apply()
-from agents import Agent, Runner, function_tool, RunContextWrapper
+from agent_pools.alpha_agent_pool.local_agents import Agent, function_tool
 
 
 # ==============================
@@ -94,33 +94,33 @@ def _construct_portfolio_impl(
 # ==============================
 
 @function_tool
-def run_portfolio_pipeline(ctx: RunContextWrapper[Any]) -> str:
+def run_portfolio_pipeline(ctx: dict) -> str:
     """Execute standard portfolio construction pipeline."""
     print("DEBUG: 💼 run_portfolio_pipeline (Macro) INVOKED")
     try:
-        alpha_signals = ctx.context.get('alpha_signals')
-        risk_signals = ctx.context.get('risk_signals')
-        transaction_costs = ctx.context.get('transaction_costs')
-        current_portfolio = ctx.context.get('current_portfolio')
-        total_capital = ctx.context.get('total_capital', 1000000.0)
+        alpha_signals = ctx.get('alpha_signals')
+        risk_signals = ctx.get('risk_signals')
+        transaction_costs = ctx.get('transaction_costs')
+        current_portfolio = ctx.get('current_portfolio')
+        total_capital = ctx.get('total_capital', 1000000.0)
         
         result = _construct_portfolio_impl(
             alpha_signals, risk_signals, transaction_costs, current_portfolio, total_capital
         )
         
-        ctx.context['result'] = result
+        ctx['result'] = result
         return f"Portfolio constructed. Assets: {len(result.get('target_weights', {}))}"
     except Exception as e:
         return f"Error: {e}"
 
 @function_tool
-def construct_portfolio_tool(ctx: RunContextWrapper[Any], max_allocation: float = 1.0) -> str:
+def construct_portfolio_tool(ctx: dict, max_allocation: float = 1.0) -> str:
     """
     Construct portfolio weights from signals in context.
     """
     print(f"DEBUG: 💼 construct_portfolio_tool INVOKED")
     try:
-        alpha_signals = ctx.context.get('alpha_signals')
+        alpha_signals = ctx.get('alpha_signals')
         if not alpha_signals: return "Error: No alpha signals."
         
         # Simple Equal Weight Logic for custom path
@@ -133,17 +133,17 @@ def construct_portfolio_tool(ctx: RunContextWrapper[Any], max_allocation: float 
             for asset, score in selected:
                 if score > 0: weights[asset] = w
                 
-        ctx.context['target_weights'] = weights
+        ctx['target_weights'] = weights
         return f"Constructed weights for {len(weights)} assets."
     except Exception as e:
         return f"Error: {e}"
 
 @function_tool
-def submit_portfolio_tool(ctx: RunContextWrapper[Any]) -> str:
+def submit_portfolio_tool(ctx: dict) -> str:
     """Submit final portfolio."""
     print("DEBUG: 💼 submit_portfolio_tool INVOKED")
     try:
-        weights = ctx.context.get('target_weights')
+        weights = ctx.get('target_weights')
         if weights is None: return "Error: No weights found."
         
         result = {
@@ -151,7 +151,7 @@ def submit_portfolio_tool(ctx: RunContextWrapper[Any]) -> str:
             "target_weights": weights,
             "message": "Custom portfolio submitted"
         }
-        ctx.context['result'] = result
+        ctx['result'] = result
         return "Portfolio submitted."
     except Exception as e:
         return f"Error: {e}"
@@ -164,7 +164,7 @@ class PortfolioAgent:
     def __init__(
         self,
         name: str = "PortfolioAgent",
-        model: str = resolve_openrouter_model("openai/gpt-4o-mini"),
+        model: str = resolve_poe_model("openai/gpt-4o-mini"),
         mode: str = "backtest"
     ):
         self.name = name
@@ -191,7 +191,7 @@ class PortfolioAgent:
         )
         
     def run(self, user_request: str, context: Optional[Dict[str, Any]] = None) -> str:
-        return Runner.run_sync(self.agent, user_request, context=context)
+        return self.agent.run(user_request, context=context, max_turns=10)
 
     def inference(
         self,
@@ -209,7 +209,7 @@ class PortfolioAgent:
         }
         
         print("DEBUG: 💼 Requesting Portfolio Agent LLM...")
-        result = Runner.run_sync(self.agent, "Construct portfolio.", context=context)
+        self.agent.run("Construct portfolio.", context=context, max_turns=5)
         
         if 'result' in context:
             return context['result']

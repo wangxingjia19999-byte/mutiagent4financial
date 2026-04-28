@@ -17,9 +17,9 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from agent_pools.openrouter_config import get_openai_client_kwargs, setup_openrouter_env, resolve_openrouter_model
+from agent_pools.poe_config import get_openai_client_kwargs, setup_poe_env, resolve_poe_model
 
-setup_openrouter_env()
+setup_poe_env()
 
 
 # ==============================
@@ -41,23 +41,31 @@ class Agent:
     General-purpose agent class supporting OpenAI Function Calling with automatic tool execution.
     """
 
-    def __init__(self, name="Agent", instructions="", model="gpt-4o-mini", tools=None):
+    def __init__(self, name="Agent", instructions="", model="GPT-5.4", tools=None):
         self.name = name
         self.instructions = instructions
-        self.model = model if model else resolve_openrouter_model("openai/gpt-4o-mini")
+        self.model = model if model else resolve_poe_model("GPT-5.4")
         self.tools = tools or []
+        from openai import OpenAI
         self.client = OpenAI(**get_openai_client_kwargs())
 
     def _find_tool(self, name):
         """Find a tool by name in the registered tool list"""
         for t in self.tools:
-            if t.__name__ == name or getattr(t, "name", None) == name:
+            t_name = getattr(t, "name", getattr(t, "__name__", ""))
+            if t_name == name:
                 return t
         return None
 
     def _build_tool_schema(self, func):
         """Automatically generate JSON schema for function parameters"""
-        sig = inspect.signature(func)
+        # If it's wrapped, it might have a __wrapped__ or similar, but inspect handles it mostly.
+        # Fallback if func is not directly a function
+        try:
+            sig = inspect.signature(func)
+        except ValueError:
+            sig = inspect.signature(func.__call__)
+
         params = {}
         required = []
 
@@ -88,6 +96,18 @@ class Agent:
             "additionalProperties": True
         }
 
+    def as_tool(self, name=None, description=None, tool_name=None, tool_description=None, **kwargs):
+        """Returns the agent as a callable function tool so it can be handled by other agents."""
+        def tool_func(request: str, context: dict = None) -> str:
+            return self.run(request, context=context)
+            
+        tool_func.__name__ = tool_name or name or self.name.replace(" ", "_")
+        tool_func.__doc__ = tool_description or description or self.instructions or f"A sub-agent named {self.name}"
+        
+        # Mark it so our _build_tool_schema knows
+        tool_func.is_tool = True
+        return tool_func
+
     def run(self, user_request, context=None, max_turns=10):
         """Core execution logic: GPT planning → automatic tool execution → result aggregation"""
         print(f"\n[Agent] Starting: {self.name}")
@@ -108,8 +128,8 @@ class Agent:
                     {
                         "type": "function",
                         "function": {
-                            "name": t.__name__,
-                            "description": t.__doc__ or "No description provided",
+                            "name": getattr(t, "name", getattr(t, "__name__", "unknown_tool")),
+                            "description": getattr(t, "description", getattr(t, "__doc__", "No description provided")),
                             "parameters": self._build_tool_schema(t)
                         }
                     }

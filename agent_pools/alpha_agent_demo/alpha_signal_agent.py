@@ -19,19 +19,20 @@ project_root = Path(__file__).resolve().parents[2]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from agent_pools.openrouter_config import setup_openrouter_env, resolve_openrouter_model
+from agent_pools.poe_config import setup_poe_env, resolve_poe_model
 
-setup_openrouter_env()
-
-# Add parent directory to path for imports
-parent_dir = Path(__file__).parent.parent
-alpha_agent_pool_path = parent_dir / "alpha_agent_pool"
-sys.path.append(str(alpha_agent_pool_path))
+setup_poe_env()
 
 # Import OpenAI Agents SDK
 import nest_asyncio
 nest_asyncio.apply()
-from agents import Agent, Runner, function_tool, RunContextWrapper
+
+# Add parent directory to path for local imports
+parent_dir = Path(__file__).parent.parent
+alpha_agent_pool_path = parent_dir / "alpha_agent_pool"
+sys.path.append(str(alpha_agent_pool_path))
+
+from local_agents import Agent, function_tool
 
 # Import Qlib utilities
 try:
@@ -287,67 +288,67 @@ def _run_alpha_pipeline_impl(
 # ==============================
 
 @function_tool
-def run_alpha_pipeline(ctx: RunContextWrapper[Any]) -> str:
+def run_alpha_pipeline(ctx: dict) -> str:
     """
     Execute the complete standard alpha pipeline (Calculate Indicators -> Train Model -> Generate Signals).
     Use this for a quick, standard analysis.
     """
     print("DEBUG: 🛠️ run_alpha_pipeline (Macro) INVOKED")
     try:
-        data = ctx.context.get('data')      # This is TEST data (current year)
-        train_data = ctx.context.get('train_data') # This is TRAIN data (prev year)
+        data = ctx.get('data')      # This is TEST data (current year)
+        train_data = ctx.get('train_data') # This is TRAIN data (prev year)
         
-        factors = ctx.context.get('factors', [])
-        indicators = ctx.context.get('indicators', ['RSI', 'MACD'])
-        model_type = ctx.context.get('model_type', 'linear')
-        threshold = ctx.context.get('signal_threshold', 0.0)
-        data_processor = ctx.context.get('data_processor')
+        factors = ctx.get('factors', [])
+        indicators = ctx.get('indicators', ['RSI', 'MACD'])
+        model_type = ctx.get('model_type', 'linear')
+        threshold = ctx.get('signal_threshold', 0.0)
+        data_processor = ctx.get('data_processor')
         
         if data is None: return "Error: No test data in context."
         
         result = _run_alpha_pipeline_impl(data, train_data, factors, indicators, model_type, threshold, data_processor)
-        ctx.context['result'] = result
+        ctx['result'] = result
         return f"Pipeline completed. Status: {result.get('status')}"
     except Exception as e:
         return f"Error: {e}"
 
 @function_tool
-def calculate_indicators_tool(ctx: RunContextWrapper[Any], indicators: List[str]) -> str:
+def calculate_indicators_tool(ctx: dict, indicators: List[str]) -> str:
     """
     Calculate specific technical indicators on the current data (Test Data).
     """
     print(f"DEBUG: 🛠️ calculate_indicators_tool INVOKED with {indicators}")
     try:
-        data = ctx.context.get('data')
+        data = ctx.get('data')
         if data is None: return "Error: No data in context."
         
         res = _calculate_technical_indicators(data, indicators)
         if res['status'] == 'success':
             # Store features in context
-            if 'features' not in ctx.context:
-                ctx.context['features'] = pd.DataFrame(index=data.index)
+            if 'features' not in ctx:
+                ctx['features'] = pd.DataFrame(index=data.index)
             
-            features = ctx.context['features']
+            features = ctx['features']
             for name, vals in res['indicators'].items():
                 features[name] = pd.Series(vals)
-            ctx.context['features'] = features
+            ctx['features'] = features
             return f"Calculated {len(res['indicators'])} indicators for Test Set."
         return f"Failed: {res.get('message')}"
     except Exception as e:
         return f"Error: {e}"
 
 @function_tool
-def train_predict_tool(ctx: RunContextWrapper[Any], model_type: str = "linear") -> str:
+def train_predict_tool(ctx: dict, model_type: str = "linear") -> str:
     """
     Train a model using TRAINING data and predict on CURRENT features.
     Requires 'train_data' in context.
     """
     print(f"DEBUG: 🛠️ train_predict_tool INVOKED with {model_type}")
     try:
-        test_data = ctx.context.get('data')
-        test_features = ctx.context.get('features')
-        train_data = ctx.context.get('train_data')
-        indicators = ctx.context.get('indicators', ['RSI', 'MACD']) # Need to know which indicators used
+        test_data = ctx.get('data')
+        test_features = ctx.get('features')
+        train_data = ctx.get('train_data')
+        indicators = ctx.get('indicators', ['RSI', 'MACD']) # Need to know which indicators used
         
         if test_features is None or test_features.empty:
             return "Error: Calculate indicators for test data first."
@@ -365,23 +366,23 @@ def train_predict_tool(ctx: RunContextWrapper[Any], model_type: str = "linear") 
         res = _train_model_and_predict(X_train, y_train, test_features, model_type)
         
         if res['status'] == 'success':
-            ctx.context['raw_predictions'] = res['predictions']
+            ctx['raw_predictions'] = res['predictions']
             return "Model trained on historical data and predictions generated for current period."
         return f"Training failed: {res.get('message')}"
     except Exception as e:
         return f"Error: {e}"
 
 @function_tool
-def submit_signals_tool(ctx: RunContextWrapper[Any], threshold: float = 0.0) -> str:
+def submit_signals_tool(ctx: dict, threshold: float = 0.0) -> str:
     """
     Convert predictions to trading signals and finalize the task.
     """
     print(f"DEBUG: 🛠️ submit_signals_tool INVOKED")
     try:
-        preds_dict = ctx.context.get('raw_predictions')
+        preds_dict = ctx.get('raw_predictions')
         if not preds_dict: return "Error: No predictions found."
         
-        data = ctx.context.get('data')
+        data = ctx.get('data')
         preds = pd.Series(preds_dict)
         
         signals = preds.apply(lambda x: 1.0 if x > threshold else (-1.0 if x < -threshold else 0.0))
@@ -413,7 +414,7 @@ def submit_signals_tool(ctx: RunContextWrapper[Any], threshold: float = 0.0) -> 
         elif 'date' in data_copy.columns:
              signals.index = pd.Index(data_copy['date'])
             
-        ctx.context['result'] = {
+        ctx['result'] = {
             "status": "success",
             "signals": signals.to_dict()
         }
@@ -430,7 +431,7 @@ class AlphaSignalAgent:
     def __init__(
         self,
         name: str = "AlphaSignalAgent",
-        model: str = resolve_openrouter_model("openai/gpt-4o-mini"),
+        model: str = resolve_poe_model("openai/gpt-4o-mini"),
         qlib_config: Optional[QlibConfig] = None
     ):
         self.name = name
@@ -501,7 +502,7 @@ class AlphaSignalAgent:
         
         request = f"Generate alpha signals. Default suggestion: Use indicators {indicators} and model {model_type}."
         
-        result = Runner.run_sync(self.agent, request, context=context)
+        result = self.agent.run(request, context=context, max_turns=10)
         print(f"DEBUG: LLM finished. Context keys: {list(context.keys())}")
         
         if 'result' in context:

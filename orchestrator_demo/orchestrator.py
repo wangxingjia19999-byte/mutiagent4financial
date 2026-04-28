@@ -11,20 +11,24 @@ import logging
 import inspect
 from typing import Any, Dict, Optional, Callable, List, Union
 
-from agent_pools.openrouter_config import setup_openrouter_env, resolve_openrouter_model
+current_dir = Path(__file__).resolve().parent
+project_root = current_dir.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-setup_openrouter_env()
+from agent_pools.poe_config import setup_poe_env, resolve_poe_model
+
+setup_poe_env()
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("Orchestrator")
 
 # Add agent paths to sys.path
-current_dir = Path(__file__).parent
-project_root = current_dir.parent
 agent_pools_dir = project_root / "agent_pools"
 
-sys.path.append(str(project_root))
+if str(project_root) not in sys.path:
+    sys.path.append(str(project_root))
 
 # Import Agents
 try:
@@ -37,11 +41,11 @@ except ImportError as e:
     logger.error(f"Failed to import agents: {e}")
     sys.exit(1)
 
-# Import OpenAI Agents SDK
+# Import Local Agents SDK
 try:
-    from agents import Agent, Runner, function_tool
-except ImportError:
-    logger.error("openai-agents-sdk not found. Please install it.")
+    from agent_pools.alpha_agent_pool.local_agents import Agent, function_tool
+except ImportError as e:
+    logger.error(f"Local agents sdk not found. {e}")
     sys.exit(1)
 
 # ------------------------------------------------------------------------------
@@ -63,7 +67,7 @@ class Orchestrator:
         self.api_key = os.getenv("ALPACA_API_KEY")
         self.secret_key = os.getenv("ALPACA_SECRET_KEY")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.openrouter_model = resolve_openrouter_model("openai/gpt-4o-mini")
+        self.openrouter_model = resolve_poe_model("openai/gpt-4o-mini")
         
         if not self.openai_api_key:
             logger.warning("OPENAI_API_KEY not found. Agents might fail.")
@@ -565,7 +569,7 @@ class Orchestrator:
     def run_agentic_pipeline(self, user_request: str):
         """Run the pipeline using the Manager Agent"""
         logger.info(f"Manager Agent processing: {user_request}")
-        return Runner.run_sync(self.manager_agent, user_request)
+        return self.manager_agent.run(user_request, max_turns=10)
 
 if __name__ == "__main__":
     orchestrator = Orchestrator()

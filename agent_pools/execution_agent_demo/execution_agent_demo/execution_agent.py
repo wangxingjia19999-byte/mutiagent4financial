@@ -13,16 +13,21 @@ project_root = Path(__file__).resolve().parents[3]
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
-from agent_pools.openrouter_config import setup_openrouter_env, resolve_openrouter_model
+from agent_pools.poe_config import setup_poe_env, resolve_poe_model
 
-setup_openrouter_env()
+setup_poe_env()
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ExecutionAgent")
 
-# Try to import OpenAI Agents SDK
-from agents import Agent, Runner, function_tool
+# Add parent directory to path for imports
+parent_dir = Path(__file__).resolve().parents[3]
+alpha_agent_pool_path = parent_dir / "agent_pools" / "alpha_agent_pool"
+sys.path.append(str(alpha_agent_pool_path))
+
+# Try to import Local Agents SDK
+from local_agents import Agent, function_tool
 
 # Try to import Alpaca SDK
 try:
@@ -223,7 +228,7 @@ class ExecutionAgent:
         
         self.agent = Agent(
             name="ExecutionAgent",
-            model=resolve_openrouter_model("openai/gpt-4o-mini"),
+            model=resolve_poe_model("openai/gpt-4o-mini"),
             instructions="""
             You are an Execution Agent responsible for executing trades on the Alpaca platform.
             You receive portfolio rebalancing instructions (target weights or specific orders).
@@ -245,5 +250,5 @@ class ExecutionAgent:
         )
 
     def run(self, instruction: str, context: Optional[Dict] = None):
-        return Runner.run_sync(self.agent, instruction, context=context)
+        return self.agent.run(instruction, context=context, max_turns=5)
 
