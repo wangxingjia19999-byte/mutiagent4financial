@@ -1,4 +1,15 @@
 {
     "python-envs.defaultEnvManager": "ms-python.python:conda",
-    "python-envs.defaultPackageManager": "ms-python.python:conda"
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    // Ensure VS Code integrated terminal uses the system Windows PowerShell by default
+    "terminal.integrated.defaultProfile.windows": "Windows PowerShell",
+    "terminal.integrated.profiles.windows": {
+        "Windows PowerShell": {
+            "path": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "args": [
+                "-NoLogo"
+            ],
+            "icon": "terminal-powershell"
+        }
+    }
 }
