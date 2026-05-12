@@ -103,6 +103,53 @@ class AlphaResearchContext:
 # ============================================================================
 
 @function_tool
+def store_agent_reflection(ctx: AlphaResearchContext, strategy_name: str, issue: str, lesson: str):
+    """Store a learned lesson into the Neo4j Long-term memory graph."""
+    start = datetime.now()
+    try:
+        import sys, os
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+            
+        from knowledge.neo4j_memory import Neo4jMemoryClient
+        
+        client = Neo4jMemoryClient()
+        result = client.store_reflection(agent_name="AlphaResearchAgent", strategy_name=strategy_name, issue=issue, lesson_learned=lesson)
+        client.close()
+        
+        ctx.log_function_call("store_agent_reflection", {"strategy": strategy_name}, result, (datetime.now() - start).total_seconds())
+        return result
+    except Exception as e:
+        return f"Neo4j Memory store failed: {e}"
+
+@function_tool
+def query_past_agent_lessons(ctx: AlphaResearchContext, keyword: str):
+    """Query past lessons from Neo4j Long-term memory using a keyword like 'overfitting'."""
+    start = datetime.now()
+    try:
+        import sys, os
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+            
+        from knowledge.neo4j_memory import Neo4jMemoryClient
+        
+        client = Neo4jMemoryClient()
+        lessons = client.retrieve_lessons_by_issue(keyword)
+        client.close()
+        
+        if not lessons:
+            result = f"No past lessons found for keyword: {keyword}"
+        else:
+            result = "Past lessons:\n" + "\n".join(lessons)
+            
+        ctx.log_function_call("query_past_agent_lessons", {"keyword": keyword}, result, (datetime.now() - start).total_seconds())
+        return result
+    except Exception as e:
+        return f"Neo4j Memory query failed: {e}"
+
+@function_tool
 def retrieve_alpha_factors_from_kb(ctx: AlphaResearchContext, query: str, top_k: int = 3):
     """Retrieve relevant quantitative factors from the knowledge base using RAG/VectorDB."""
     start = datetime.now()
