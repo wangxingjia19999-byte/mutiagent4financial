@@ -103,6 +103,35 @@ class AlphaResearchContext:
 # ============================================================================
 
 @function_tool
+def retrieve_alpha_factors_from_kb(ctx: AlphaResearchContext, query: str, top_k: int = 3):
+    """Retrieve relevant quantitative factors from the knowledge base using RAG/VectorDB."""
+    start = datetime.now()
+    try:
+        import sys
+        import os
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        if project_root not in sys.path:
+            sys.path.append(project_root)
+            
+        from knowledge.rag_client import FactorRAGClient
+        
+        rag_client = FactorRAGClient()
+        results = rag_client.query(query, n_results=top_k)
+        
+        if not results:
+            summary = "No matching factors found in the knowledge base."
+        else:
+            summary = f"Found {len(results)} referring factors:\n\n" + "\n\n".join(results)
+            
+        ctx.log_function_call("retrieve_alpha_factors_from_kb", {"query": query, "top_k": top_k}, summary, 
+                              (datetime.now() - start).total_seconds())
+        return summary
+    except ImportError as e:
+        return f"RAG Client dependencies missing. Ensure chromadb is installed: {e}"
+    except Exception as e:
+        return f"RAG Query failed: {e}"
+
+@function_tool
 def load_and_analyze_data(ctx: AlphaResearchContext, csv_path: str, qlib_format: bool = False):
     """Load and analyze asset data, compute technical indicators and signals"""
     start = datetime.now()
