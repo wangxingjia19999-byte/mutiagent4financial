@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import time
 import importlib
 import pandas as pd
 import numpy as np
@@ -17,6 +18,10 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from agent_pools.poe_config import setup_poe_env, resolve_poe_model
+from dotenv import load_dotenv
+
+# Load .env file explicitly
+load_dotenv()
 
 setup_poe_env()
 
@@ -37,6 +42,11 @@ try:
     from agent_pools.portfolio_agent_demo.portfolio_agent import PortfolioAgent
     from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent import ExecutionAgent
     from agent_pools.backtest_agent_pool.backtest_agent import BacktestAgent
+    from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent import (
+        is_market_open, market_status_str, alpaca_service,
+    )
+    from agent_pools.execution_agent_demo.execution_agent_demo.trade_journal import TradeJournal
+    from agent_pools.portfolio_agent_demo.portfolio_agent import generate_orders
 except ImportError as e:
     logger.error(f"Failed to import agents: {e}")
     sys.exit(1)
@@ -54,10 +64,12 @@ except ImportError as e:
 try:
     StockHistoricalDataClient = importlib.import_module("alpaca.data.historical").StockHistoricalDataClient
     StockBarsRequest = importlib.import_module("alpaca.data.requests").StockBarsRequest
+    StockLatestQuoteRequest = importlib.import_module("alpaca.data.requests").StockLatestQuoteRequest
     TimeFrame = importlib.import_module("alpaca.data.timeframe").TimeFrame
 except ImportError:
     logger.warning("alpaca-py not installed. Data fetching will be mocked.")
     StockHistoricalDataClient = None
+    StockLatestQuoteRequest = None
 
 # ------------------------------------------------------------------------------
 # Orchestrator
@@ -67,15 +79,15 @@ class Orchestrator:
         self.api_key = os.getenv("ALPACA_API_KEY")
         self.secret_key = os.getenv("ALPACA_SECRET_KEY")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.openrouter_model = resolve_poe_model("openai/gpt-4o-mini")
+        self.poe_model = resolve_poe_model("GPT-5.4")
         
         if not self.openai_api_key:
             logger.warning("OPENAI_API_KEY not found. Agents might fail.")
             
         # Initialize Sub-Agents
-        self.alpha_agent = AlphaSignalAgent(name="AlphaCore", model=self.openrouter_model)
-        self.risk_agent = RiskSignalAgent(name="RiskCore", model=self.openrouter_model)
-        self.portfolio_agent = PortfolioAgent(name="PortfolioCore", model=self.openrouter_model)
+        self.alpha_agent = AlphaSignalAgent(name="AlphaCore", model=self.poe_model)
+        self.risk_agent = RiskSignalAgent(name="RiskCore", model=self.poe_model)
+        self.portfolio_agent = PortfolioAgent(name="PortfolioCore", model=self.poe_model)
         
         self.execution_agent = ExecutionAgent(
             alpaca_api_key=self.api_key, 
@@ -287,6 +299,53 @@ class Orchestrator:
             
         return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
 
+    def fetch_realtime_prices(self, symbols: List[str]) -> Dict[str, float]:
+        """
+        Fetch real-time bid/ask prices from Alpaca for order sizing.
+        Falls back to yfinance, then to mock.
+        """
+        # 1. Try Alpaca real-time quotes
+        if self.data_client and StockLatestQuoteRequest:
+            try:
+                req = StockLatestQuoteRequest(symbol_or_symbols=symbols)
+                quotes = self.data_client.get_stock_latest_quote(req)
+                prices: Dict[str, float] = {}
+                for sym, quote in quotes.items():
+                    bid = getattr(quote, 'bid_price', 0) or 0
+                    ask = getattr(quote, 'ask_price', 0) or 0
+                    mid = (bid + ask) / 2
+                    prices[sym] = mid if mid > 0 else getattr(quote, 'last_price', 100.0) or 100.0
+                if prices:
+                    logger.info("Real-time prices from Alpaca: %s",
+                                {s: round(p, 2) for s, p in prices.items()})
+                    return prices
+            except Exception as e:
+                logger.warning("Alpaca real-time quotes failed: %s", e)
+
+        # 2. Try yfinance fast info
+        try:
+            import yfinance as yf
+            prices = {}
+            for sym in symbols:
+                ticker = yf.Ticker(sym)
+                info = ticker.fast_info
+                price = getattr(info, 'last_price', 0) or getattr(info, 'regular_market_price', 0)
+                if not price:
+                    hist = ticker.history(period="1d")
+                    if not hist.empty:
+                        price = float(hist['Close'].iloc[-1])
+                prices[sym] = price if price else 100.0
+            if any(v > 0 for v in prices.values()):
+                logger.info("Real-time prices from yfinance: %s",
+                            {s: round(p, 2) for s, p in prices.items()})
+                return prices
+        except Exception as e:
+            logger.warning("yfinance real-time failed: %s", e)
+
+        # 3. Mock fallback
+        logger.warning("Using mock real-time prices")
+        return {s: 100.0 for s in symbols}
+
     def run_pipeline(self, symbol: Union[str, List[str]], start_date: str, end_date: str, mode: str = "backtest",
                      total_capital: float = 100000.0, rebalance_freq: int = 5) -> Dict[str, Any]:
         """
@@ -346,32 +405,43 @@ class Orchestrator:
             
             # 3. Risk Analysis
             risk_result = self.risk_agent.generate_risk_signals_from_data(test_data)
-            
+
             if risk_result["status"] != "success":
                 logger.warning(f"Risk analysis failed: {risk_result.get('message')}")
-                
-            # 4. Backtest
-            # The backtest agent expects predictions as pd.Series with MultiIndex (datetime, instrument)
+
+            # 4. Portfolio Construction — extract per-symbol scores from alpha signals
+            # Alpha signals format: {(date, symbol): score} — collate latest score per symbol
             predictions_dict = alpha_result.get("signals", {})
-            
-            # Convert dict to Series
             if not predictions_dict:
                  return {"status": "error", "message": "No signals generated"}
-            
-            signals_series = pd.Series(predictions_dict)
-            
-            # Ensure MultiIndex (date, symbol)
-            if not isinstance(signals_series.index, pd.MultiIndex):
-                # If index is just date (single symbol case)
-                if len(symbols) == 1:
-                    signals_series.index = pd.MultiIndex.from_product([signals_series.index, [symbols[0]]], names=['datetime', 'instrument'])
+
+            symbol_scores: Dict[str, float] = {}
+            for key, score in predictions_dict.items():
+                if isinstance(key, tuple):
+                    sym = key[1] if len(key) > 1 else key[0]
                 else:
-                    # If we have multiple symbols but single index, this implies AlphaAgent return format issue
-                    # But AlphaAgent should return MultiIndex for multiple symbols
-                    # We assume signals keys are already (date, symbol) tuples if multi-asset
+                    sym = str(key)
+                symbol_scores[sym] = float(score)
+
+            portfolio_result = self.portfolio_agent.inference(
+                alpha_signals=symbol_scores,
+                risk_signals=risk_result,
+                total_capital=total_capital,
+            )
+
+            if portfolio_result.get("status") != "success":
+                logger.warning(f"Portfolio construction failed: {portfolio_result.get('message')}")
+
+            # 5. Backtest — use the original MultiIndex signals for the backtest engine
+            signals_series = pd.Series(predictions_dict)
+
+            if not isinstance(signals_series.index, pd.MultiIndex):
+                if len(symbols) == 1:
+                    signals_series.index = pd.MultiIndex.from_product(
+                        [signals_series.index, [symbols[0]]], names=['datetime', 'instrument'])
+                else:
                     signals_series.index.names = ['datetime', 'instrument']
             else:
-                # Ensure names are correct
                 signals_series.index.names = ['datetime', 'instrument']
 
             backtest_result = self.backtest_agent.run_simple_backtest_paper_interface(
@@ -380,10 +450,16 @@ class Orchestrator:
                 end_time=end_date,
                 investment_horizon=rebalance_freq,
                 total_capital=total_capital,
-                market_data=test_data, # Backtest on Test Data only
-                plot_results=False 
+                market_data=test_data,
+                plot_results=False
             )
-            
+
+            # Attach portfolio & signal info for downstream execution
+            backtest_result["signals"] = symbol_scores
+            backtest_result["target_weights"] = portfolio_result.get("target_weights", {})
+            backtest_result["risk_level"] = risk_result.get("overall_risk_level", "UNKNOWN")
+            backtest_result["exit_candidates"] = portfolio_result.get("exit_candidates", [])
+
             return backtest_result
             
         except Exception as e:
@@ -497,7 +573,12 @@ class Orchestrator:
                 market_data=backtest_market_data,
                 plot_results=False
             )
-            
+
+            # Attach the last week's signals for execution
+            if all_signals_list:
+                last_sigs = all_signals_list[-1]
+                backtest_result["signals"] = last_sigs.to_dict() if hasattr(last_sigs, 'to_dict') else last_sigs
+
             return backtest_result
             
         except Exception as e:
@@ -505,6 +586,239 @@ class Orchestrator:
             import traceback
             traceback.print_exc()
             return {"status": "error", "message": str(e)}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Live Trading
+    # ══════════════════════════════════════════════════════════════════════
+
+    def run_live_trading_cycle(
+        self,
+        symbols: List[str],
+        total_capital: float = 100000.0,
+        max_positions: int = 10,
+        journal=None,
+    ) -> Dict[str, Any]:
+        """
+        Execute one complete trading cycle:
+        Fetch -> Alpha -> Risk -> Portfolio -> Execute.
+        """
+        cycle_id = getattr(journal, '_cycle_id', 0) + 1 if journal else 0
+        logger.info("=== Live Trading Cycle #%d ===", cycle_id)
+
+        market_status = market_status_str()
+        if journal:
+            journal.start_cycle(cycle_id, market_status)
+
+        if not is_market_open():
+            logger.info("Market %s - skipping execution.", market_status)
+            if journal:
+                journal.finish_cycle()
+            return {"status": "skipped", "market_status": market_status,
+                    "reason": f"Market {market_status}", "cycle_id": cycle_id}
+
+        try:
+            # 1. Fetch latest market data
+            end_dt = datetime.now()
+            start_dt = end_dt - timedelta(days=90)
+            data = self.fetch_data(symbols, start_dt, end_dt)
+
+            if data.empty:
+                return {"status": "error", "message": "No market data", "cycle_id": cycle_id}
+
+            if 'date' in data.columns:
+                data['date'] = pd.to_datetime(data['date']).dt.tz_localize(None)
+                cutoff = data['date'].max() - timedelta(days=30)
+                train_data = data[data['date'] < cutoff].copy()
+                test_data = data[data['date'] >= cutoff].copy()
+            else:
+                train_data = data.iloc[:-30] if len(data) > 30 else data
+                test_data = data.iloc[-30:] if len(data) > 30 else data
+
+            # 2. Alpha signals
+            factors = [
+                {"factor_name": "momentum_20", "factor_type": "technical",
+                 "calculation_method": "expression", "expression": "close / Ref(close, 20) - 1",
+                 "lookback_period": 20},
+            ]
+            indicators = ["RSI", "MACD", "Bollinger"]
+
+            alpha_result = self.alpha_agent.generate_signals_from_data(
+                data=test_data, train_data=train_data,
+                factors=factors, indicators=indicators,
+                model_type="linear", signal_threshold=0.0,
+            )
+
+            if alpha_result["status"] != "success":
+                return {"status": "error", "message": f"Alpha failed: {alpha_result.get('message')}", "cycle_id": cycle_id}
+
+            # 3. Risk assessment
+            risk_result = self.risk_agent.generate_risk_signals_from_data(test_data)
+
+            # 4. Extract per-symbol scores from alpha signals
+            predictions_dict = alpha_result.get("signals", {})
+            symbol_scores: Dict[str, float] = {}
+            for key, score in predictions_dict.items():
+                sym = key[1] if isinstance(key, tuple) and len(key) > 1 else str(key)
+                symbol_scores[sym] = float(score)
+
+            # 5. Portfolio construction
+            portfolio_result = self.portfolio_agent.inference(
+                alpha_signals=symbol_scores,
+                risk_signals=risk_result,
+                total_capital=total_capital,
+                max_positions=max_positions,
+            )
+
+            target_weights = portfolio_result.get("target_weights", {})
+            risk_level = risk_result.get("overall_risk_level", "UNKNOWN")
+
+            if journal:
+                journal.log_signals(symbol_scores, risk_level)
+
+            # 6. Get current positions from Alpaca and real-time prices for order sizing
+            current_positions: Dict[str, float] = {}
+            market_prices: Dict[str, float] = {}
+            if alpaca_service:
+                try:
+                    positions = alpaca_service.get_positions()
+                    for p in positions:
+                        sym = getattr(p, "symbol", "")
+                        if sym:
+                            current_positions[sym] = float(getattr(p, "market_value", 0))
+                    logger.info("Current positions: %d held", len(current_positions))
+                except Exception as e:
+                    logger.warning("Failed to get Alpaca positions: %s", e)
+
+            # Use real-time prices for accurate order sizing (not yesterday's close)
+            market_prices = self.fetch_realtime_prices(symbols)
+
+            # 7. Generate orders from weight diffs
+            orders = generate_orders(
+                target_weights=target_weights,
+                current_positions=current_positions,
+                total_capital=total_capital,
+                market_prices=market_prices,
+            )
+
+            decisions = [
+                {"symbol": o["symbol"], "action": o["side"].upper(), "qty": o["qty"],
+                 "reason": o.get("reason", "")}
+                for o in orders
+            ]
+            if journal:
+                journal.log_decisions(decisions)
+
+            # 8. Execute orders
+            execution_results: List[Dict[str, Any]] = []
+            if orders:
+                execution_results = self.execution_agent.execute_orders_direct(orders)
+                logger.info("Executed %d orders: %s", len(execution_results),
+                            [(r.get("symbol"), r.get("status")) for r in execution_results])
+
+                if journal:
+                    for i, order in enumerate(orders):
+                        result = execution_results[i] if i < len(execution_results) else {"status": "unknown"}
+                        journal.log_execution(order, result)
+
+            if journal:
+                journal.finish_cycle()
+
+            return {
+                "status": "success",
+                "cycle_id": cycle_id,
+                "market_status": market_status,
+                "signals": symbol_scores,
+                "risk_level": risk_level,
+                "target_weights": target_weights,
+                "decisions": decisions,
+                "executions": execution_results,
+            }
+
+        except Exception as e:
+            logger.error("Cycle #%d error: %s", cycle_id, e)
+            import traceback
+            traceback.print_exc()
+            if journal:
+                journal.finish_cycle()
+            return {"status": "error", "message": str(e), "cycle_id": cycle_id}
+
+    def run_live_trading_loop(
+        self,
+        symbols: List[str],
+        total_capital: float = 100000.0,
+        interval_seconds: int = 300,
+        max_positions: int = 10,
+    ) -> None:
+        """
+        Continuously run live trading cycles with status panel and graceful shutdown.
+        """
+        journal = TradeJournal()
+        cycle = 0
+
+        print("\n" + "=" * 60)
+        print("  LIANGHUA Auto Trading System - LIVE PAPER")
+        print("=" * 60)
+        print(f"  Symbols:     {', '.join(symbols)}")
+        print(f"  Interval:    {interval_seconds}s")
+        print(f"  Capital:     ${total_capital:,.0f}")
+        print(f"  MaxPositions: {max_positions}")
+        print("=" * 60)
+        print("  Press Ctrl+C to stop.\n")
+
+        try:
+            while True:
+                cycle += 1
+                ms = market_status_str()
+
+                # Status panel
+                print(f"\n{'='*50}")
+                print(f"  Cycle #{cycle}  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                print(f"  Market: {ms}")
+                if alpaca_service:
+                    try:
+                        acct = alpaca_service.get_account()
+                        pv = float(acct.portfolio_value) if hasattr(acct, 'portfolio_value') else 0
+                        cash = float(acct.cash) if hasattr(acct, 'cash') else 0
+                        print(f"  Portfolio: ${pv:,.0f}  |  Cash: ${cash:,.0f}")
+                        positions = alpaca_service.get_positions()
+                        if positions:
+                            print(f"  Positions: {len(positions)}")
+                            for p in positions[:10]:
+                                sym = getattr(p, 'symbol', '?')
+                                qty = getattr(p, 'qty', 0)
+                                mv = getattr(p, 'market_value', 0)
+                                print(f"    {sym:<6} {float(qty):>8.1f} sh  ${float(mv):>10,.0f}")
+                    except Exception:
+                        pass
+                print(f"{'='*50}")
+
+                # Run cycle
+                result = self.run_live_trading_cycle(
+                    symbols=symbols,
+                    total_capital=total_capital,
+                    max_positions=max_positions,
+                    journal=journal,
+                )
+
+                status = result.get("status", "?")
+                if status == "success":
+                    tw = result.get("target_weights", {})
+                    n_orders = len(result.get("executions", []))
+                    print(f"  >> Risk={result.get('risk_level','?')}  Targets={len(tw)}  Orders={n_orders}")
+                    if tw:
+                        print(f"  >> Weights: {', '.join(f'{s}:{w:.1%}' for s,w in list(tw.items())[:5])}")
+                elif status == "skipped":
+                    print(f"  >> Skipped: {result.get('reason', '')}")
+                else:
+                    print(f"  >> Error: {result.get('message', '')}")
+
+                print(f"  -- Waiting {interval_seconds}s until next cycle...")
+                time.sleep(interval_seconds)
+
+        except KeyboardInterrupt:
+            print("\n\n  Shutting down gracefully...")
+            print("  Trade journals saved to trade_journals/")
+            print("  Goodbye.\n")
 
     def optimize_agent_prompts(self, agent_name: str, performance_metric: str, current_value: float, target_value: float) -> str:
         """

@@ -35,5 +35,11 @@ def get_openai_client_kwargs() -> Dict[str, Any]:
     if base_url:
         kwargs["base_url"] = base_url
 
+    # Add default headers for Poe API
+    kwargs["default_headers"] = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
     return kwargs
 

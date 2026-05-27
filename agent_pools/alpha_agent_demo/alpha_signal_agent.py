@@ -1,11 +1,3 @@
-"""
-Alpha Signal Agent using OpenAI Agent SDK
-
-This agent integrates Qlib factor construction, technical indicators, and ML inference
-to generate alpha trading signals. It supports both a monolithic pipeline and a 
-flexible ReAct workflow where the agent can choose tools dynamically.
-"""
-
 import os
 import sys
 import pandas as pd
@@ -450,19 +442,16 @@ class AlphaSignalAgent:
         self.agent = Agent(
             name=name,
             instructions="""
-            You are an Alpha Signal Agent.
-            You have market data in your context:
-            - 'data': Current period data (Test Set) to generate signals for.
-            - 'train_data': Previous period data (Train Set) to train models on.
-            
-            You can choose ONE of two paths:
-            1. FAST PATH: Use 'run_alpha_pipeline' to execute a standard strategy immediately.
-            2. CUSTOM PATH: Build a strategy step-by-step:
-               a. Call 'calculate_indicators_tool' (e.g. with ['RSI', 'MACD']) - calculates features on Test Data.
-               b. Call 'train_predict_tool' (e.g. 'random_forest') - trains on Train Data, predicts on Test Data.
-               c. Call 'submit_signals_tool'
-            
-            Choose the Custom Path if you need to refine the model or use specific indicators.
+            You are an Alpha Signal Agent. Your task is to generate trading signals.
+
+            IMPORTANT: Always use the FAST PATH first:
+            Call 'run_alpha_pipeline' ONCE. This handles indicator calculation, model training,
+            and signal generation all at once. Do NOT call it more than once.
+
+            Only use the Custom Path (calculate_indicators_tool → train_predict_tool → submit_signals_tool)
+            if the pipeline tool reports an error.
+
+            After receiving a successful result, respond ONLY with the text "DONE".
             """,
             model=model,
             tools=self.tools
@@ -500,7 +489,11 @@ class AlphaSignalAgent:
         # Default instruction uses the variables passed in.
         # But the agent's system prompt (self.agent.instructions) encourages flexibility.
         
-        request = f"Generate alpha signals. Default suggestion: Use indicators {indicators} and model {model_type}."
+        request = (
+            f"Generate alpha signals. "
+            f"Call 'run_alpha_pipeline' ONCE to handle everything automatically. "
+            f"Default parameters: indicators={indicators}, model={model_type}."
+        )
         
         result = self.agent.run(request, context=context, max_turns=10)
         print(f"DEBUG: LLM finished. Context keys: {list(context.keys())}")

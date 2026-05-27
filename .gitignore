@@ -10,3 +10,4 @@ venv/
 logs/
 .chroma/
 *.log
+.demo.py

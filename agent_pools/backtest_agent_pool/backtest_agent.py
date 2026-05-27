@@ -1,4 +1,12 @@
-from agent_pools.backtest_agent_pool.local_agents import Agent, ModelSettings, function_tool
+import sys
+from pathlib import Path
+
+# Ensure the orchestrator's Agent class is importable
+_project_root = Path(__file__).resolve().parents[2]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from agent_pools.alpha_agent_pool.local_agents import Agent
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -6,6 +14,43 @@ import json
 import os
 import warnings
 warnings.filterwarnings('ignore')
+
+# ---------------------------------------------------------------------------
+# Compatible function_tool – wraps methods as tool objects the orchestrator
+# Agent can inspect and call, while preserving the original function signature.
+# ---------------------------------------------------------------------------
+def function_tool(func=None, *, name=None, description=None):
+    """Wrap a method as a tool object compatible with the orchestrator Agent."""
+    if func is None:
+        # Used as @function_tool decorator
+        def decorator(f):
+            return _make_tool(f, name, description)
+        return decorator
+
+    # Used as function_tool(func=self.xxx, name=..., description=...)
+    if name is None:
+        name = getattr(func, '__name__', 'unknown')
+    if description is None:
+        description = getattr(func, '__doc__', 'No description') or 'No description'
+
+    class _ToolWrapper:
+        def __init__(self, func, name, description):
+            self.func = func
+            self.name = name
+            self.description = description
+            self.__wrapped__ = func  # inspect.signature follows this
+        def __call__(self, *args, **kwargs):
+            return self.func(*args, **kwargs)
+
+    return _ToolWrapper(func, name, description)
+
+
+def _make_tool(func, name, description):
+    """Create a tool from a decorated function."""
+    func.is_tool = True
+    func.name = name or func.__name__
+    func.description = description or func.__doc__ or 'No description'
+    return func
 
 # Import visualization module (decoupled)
 try:
@@ -75,17 +120,8 @@ except ImportError as e:
 
 class BacktestAgent(Agent):
     def __init__(self):
-        super().__init__()
         self.name = "BacktestAgent"
         self.description = "An agent that performs backtesting of trading strategies using historical market data and Qlib framework."
-        self.model = ModelSettings(
-            model_name="gpt-4-turbo",
-            temperature=0.3,
-            max_tokens=2000,
-            top_p=1.0,
-            frequency_penalty=0.0,
-            presence_penalty=0.0
-        )
         self.tools = [
             function_tool(
                 func=self.initialize_qlib_data,
@@ -194,9 +230,18 @@ class BacktestAgent(Agent):
                 description="Run simple backtest following paper interface design (Alpha Model, Risk Model, Transaction Cost Model)."
             )
         ]
+
+        # Call parent Agent.__init__ to set up LLM client, instructions, etc.
+        super().__init__(
+            name=self.name,
+            instructions=self.description,
+            model="GPT-5.4",
+            tools=self.tools,
+        )
+
         self.max_iterations = 15
         self.max_response_time = 600  # seconds
-        
+
         # Initialize backtest context
         self.backtest_context = {
             'data_initialized': False,

@@ -11,5 +11,12 @@
             ],
             "icon": "terminal-powershell"
         }
-    }
+    },
+    "python-envs.pythonProjects": [
+        {
+            "path": "test_alpaca_connection.py",
+            "envManager": "ms-python.python:conda",
+            "packageManager": "ms-python.python:conda"
+        }
+    ]
 }

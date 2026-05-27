@@ -50,7 +50,7 @@ class Neo4jMemoryClient:
                         lesson_learned=lesson_learned,
                         timestamp=datetime.now().isoformat())
             return f"Successfully stored reflection for {strategy_name} by {agent_name}."
-
+       
     def retrieve_lessons_by_issue(self, keyword: str):
         """
         Retrieve past lessons when encountering a similar issue (e.g., 'overfitting').
