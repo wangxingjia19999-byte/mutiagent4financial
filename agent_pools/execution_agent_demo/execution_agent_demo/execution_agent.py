@@ -81,9 +81,9 @@ def market_status_str() -> str:
 
 # ── Risk Controls ─────────────────────────────────────────────
 
-MAX_POSITION_PCT = 0.25   # max 25% of portfolio in a single stock
-MAX_ORDER_VALUE = 50000.0  # max $50k per single order
-MIN_ORDER_VALUE = 50.0     # don't bother with orders under $50
+MAX_POSITION_PCT = 0.05   # max 5% of portfolio in a single stock (diversified)
+MAX_ORDER_VALUE = 200000.0 # max $200k per single order
+MIN_ORDER_VALUE = 50.0     # skip orders under $50
 
 
 def validate_order(

@@ -44,7 +44,7 @@ def _construct_portfolio_impl(
     transaction_costs: Any,
     current_portfolio: Any = None,
     total_capital: float = 100000.0,
-    max_positions: int = 10,
+    max_positions: int = 20,
 ) -> Dict[str, Any]:
     """Build target portfolio weights from alpha signals, adjusted for risk level."""
     try:
@@ -69,18 +69,20 @@ def _construct_portfolio_impl(
         positive = {s: v for s, v in raw_signals.items() if v > 0}
         negative = {s: v for s, v in raw_signals.items() if v <= 0}
 
-        # 4. Signal-strength-weighted allocation for positive signals
+        # 4. Equal-risk-weighted allocation for positive signals
         target_weights: Dict[str, float] = {}
         exit_candidates: List[str] = list(negative.keys())
 
         if positive:
-            total_score = sum(positive.values())
-            # Select top assets up to max_positions
+            # Rank by score, take top max_positions
             ranked = sorted(positive.items(), key=lambda x: x[1], reverse=True)
             selected = ranked[:max_positions]
 
-            for symbol, score in selected:
-                target_weights[symbol] = (score / total_score) * alloc_pct
+            if selected:
+                # Equal weight among selected (diversified), scaled by risk allocation
+                weight_per_position = alloc_pct / len(selected)
+                for symbol, score in selected:
+                    target_weights[symbol] = weight_per_position
 
         return {
             "status": "success",
@@ -205,7 +207,7 @@ def construct_portfolio_tool(ctx: dict, max_allocation: float = 1.0) -> str:
 
         # Simple Equal Weight Logic for custom path
         sorted_assets = sorted(alpha_signals.items(), key=lambda x: x[1], reverse=True)
-        top_k = 5
+        top_k = ctx.get('max_positions', 20)
         selected = sorted_assets[:top_k]
         weights = {}
         if selected:
@@ -284,7 +286,7 @@ class PortfolioAgent:
         transaction_costs: Optional[Dict[str, float]] = None,
         current_portfolio: Optional[Dict[str, float]] = None,
         total_capital: float = 100000.0,
-        max_positions: int = 10,
+        max_positions: int = 20,
     ) -> Dict[str, Any]:
         tx_costs = transaction_costs or {"fixed_cost": 1.0, "slippage": 0.0001}
 

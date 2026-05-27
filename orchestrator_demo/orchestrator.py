@@ -299,55 +299,113 @@ class Orchestrator:
             
         return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
 
+    def _quick_screen_live(
+        self, symbols: List[str], top_n: int = 200
+    ) -> List[str]:
+        """
+        Fast pre-screen for live trading: use Alpaca snapshots to filter the
+        universe down to the top candidates by momentum + volume, so the ML
+        pipeline only runs on a manageable subset.
+        """
+        if len(symbols) <= top_n:
+            return symbols
+
+        if not self.data_client:
+            logger.info("No Alpaca data client — using first %d symbols", top_n)
+            return symbols[:top_n]
+
+        try:
+            from alpaca.data.requests import StockSnapshotRequest
+
+            scored: List[tuple] = []  # (symbol, score)
+            batch_size = 500
+
+            for i in range(0, len(symbols), batch_size):
+                batch = symbols[i:i + batch_size]
+                try:
+                    req = StockSnapshotRequest(symbol_or_symbols=batch)
+                    snaps = self.data_client.get_stock_snapshot(req)
+
+                    for sym, snap in (snaps or {}).items():
+                        bar = getattr(snap, 'daily_bar', None)
+                        prev_bar = getattr(snap, 'previous_daily_bar', None)
+                        trade = getattr(snap, 'latest_trade', None)
+
+                        price = 0.0
+                        if trade and getattr(trade, 'price', 0):
+                            price = float(trade.price)
+                        elif bar and getattr(bar, 'close', 0):
+                            price = float(bar.close)
+
+                        volume = float(getattr(bar, 'volume', 0)) if bar else 0.0
+
+                        # Skip ultra-low price / no-volume stocks
+                        if price < 2 or volume < 50_000:
+                            continue
+
+                        # Simple momentum score: today's change % weighted by volume
+                        prev_close = float(getattr(prev_bar, 'close', price)) if prev_bar else price
+                        change_pct = (price - prev_close) / prev_close if prev_close > 0 else 0
+
+                        # Score = abs(momentum) * log(volume)  (prefer high vol + strong move)
+                        score = abs(change_pct) * np.log1p(volume)
+                        scored.append((sym, score))
+
+                except Exception as e:
+                    logger.warning("Snapshot screen batch failed: %s", e)
+                    # Keep a portion of the failed batch
+                    scored.extend((s, 0) for s in batch[:50])
+
+            # Sort by score descending, take top_n
+            scored.sort(key=lambda x: x[1], reverse=True)
+            selected = [s for s, _ in scored[:top_n]]
+
+            logger.info("Quick screen: %d -> %d candidates (momentum+volume)", len(symbols), len(selected))
+            return selected
+
+        except Exception as e:
+            logger.warning("Quick screen failed: %s — falling back to first %d", e, top_n)
+            return symbols[:top_n]
+
     def fetch_realtime_prices(self, symbols: List[str]) -> Dict[str, float]:
         """
-        Fetch real-time bid/ask prices from Alpaca for order sizing.
-        Falls back to yfinance, then to mock.
+        Fetch real-time prices from Alpaca for order sizing.
+        Uses batched snapshot requests for efficiency with large symbol lists.
         """
-        # 1. Try Alpaca real-time quotes
-        if self.data_client and StockLatestQuoteRequest:
+        prices: Dict[str, float] = {}
+
+        # 1. Try Alpaca snapshots (batched, efficient for many symbols)
+        if self.data_client:
             try:
-                req = StockLatestQuoteRequest(symbol_or_symbols=symbols)
-                quotes = self.data_client.get_stock_latest_quote(req)
-                prices: Dict[str, float] = {}
-                for sym, quote in quotes.items():
-                    bid = getattr(quote, 'bid_price', 0) or 0
-                    ask = getattr(quote, 'ask_price', 0) or 0
-                    mid = (bid + ask) / 2
-                    prices[sym] = mid if mid > 0 else getattr(quote, 'last_price', 100.0) or 100.0
+                from alpaca.data.requests import StockSnapshotRequest
+
+                for i in range(0, len(symbols), 500):
+                    batch = symbols[i:i + 500]
+                    req = StockSnapshotRequest(symbol_or_symbols=batch)
+                    snaps = self.data_client.get_stock_snapshot(req)
+                    for sym, snap in (snaps or {}).items():
+                        trade = getattr(snap, 'latest_trade', None)
+                        bar = getattr(snap, 'daily_bar', None)
+                        p = 0.0
+                        if trade and getattr(trade, 'price', 0):
+                            p = float(trade.price)
+                        elif bar and getattr(bar, 'close', 0):
+                            p = float(bar.close)
+                        if p > 0:
+                            prices[sym] = p
+
                 if prices:
-                    logger.info("Real-time prices from Alpaca: %s",
-                                {s: round(p, 2) for s, p in prices.items()})
+                    logger.info("Real-time prices from Alpaca snapshots: %d symbols", len(prices))
                     return prices
             except Exception as e:
-                logger.warning("Alpaca real-time quotes failed: %s", e)
+                logger.warning("Alpaca snapshot prices failed: %s", e)
 
-        # 2. Try yfinance fast info
-        try:
-            import yfinance as yf
-            prices = {}
-            for sym in symbols:
-                ticker = yf.Ticker(sym)
-                info = ticker.fast_info
-                price = getattr(info, 'last_price', 0) or getattr(info, 'regular_market_price', 0)
-                if not price:
-                    hist = ticker.history(period="1d")
-                    if not hist.empty:
-                        price = float(hist['Close'].iloc[-1])
-                prices[sym] = price if price else 100.0
-            if any(v > 0 for v in prices.values()):
-                logger.info("Real-time prices from yfinance: %s",
-                            {s: round(p, 2) for s, p in prices.items()})
-                return prices
-        except Exception as e:
-            logger.warning("yfinance real-time failed: %s", e)
-
-        # 3. Mock fallback
-        logger.warning("Using mock real-time prices")
+        # 2. Mock fallback
+        logger.warning("Using mock real-time prices ($100 each)")
         return {s: 100.0 for s in symbols}
 
     def run_pipeline(self, symbol: Union[str, List[str]], start_date: str, end_date: str, mode: str = "backtest",
-                     total_capital: float = 100000.0, rebalance_freq: int = 5) -> Dict[str, Any]:
+                     total_capital: float = 100000.0, rebalance_freq: int = 5, max_positions: int = 20) -> Dict[str, Any]:
         """
         Run the complete investment pipeline: Data -> Alpha -> Risk -> Portfolio -> Backtest
         """
@@ -427,6 +485,7 @@ class Orchestrator:
                 alpha_signals=symbol_scores,
                 risk_signals=risk_result,
                 total_capital=total_capital,
+                max_positions=max_positions,
             )
 
             if portfolio_result.get("status") != "success":
@@ -595,12 +654,15 @@ class Orchestrator:
         self,
         symbols: List[str],
         total_capital: float = 100000.0,
-        max_positions: int = 10,
+        max_positions: int = 20,
         journal=None,
     ) -> Dict[str, Any]:
         """
         Execute one complete trading cycle:
-        Fetch -> Alpha -> Risk -> Portfolio -> Execute.
+        Screen → Fetch → Alpha → Risk → Portfolio → Execute.
+
+        For large universes (>200 symbols), a quick snapshot-based screen
+        narrows the list before the full ML pipeline runs.
         """
         cycle_id = getattr(journal, '_cycle_id', 0) + 1 if journal else 0
         logger.info("=== Live Trading Cycle #%d ===", cycle_id)
@@ -617,10 +679,28 @@ class Orchestrator:
                     "reason": f"Market {market_status}", "cycle_id": cycle_id}
 
         try:
-            # 1. Fetch latest market data
+            # 0. Quick pre-screen for large universes (momentum + volume filter)
+            candidates = self._quick_screen_live(symbols, top_n=200)
+            logger.info("Live cycle: %d candidates after pre-screen (from %d total)",
+                        len(candidates), len(symbols))
+
+            # 1. Fetch latest market data for candidates + currently held positions
+            if alpaca_service:
+                held_symbols = []
+                try:
+                    for p in alpaca_service.get_positions():
+                        s = getattr(p, "symbol", "")
+                        if s and s not in candidates:
+                            held_symbols.append(s)
+                except Exception:
+                    pass
+                fetch_symbols = list(dict.fromkeys(candidates + held_symbols))  # dedupe, preserve order
+            else:
+                fetch_symbols = candidates
+
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=90)
-            data = self.fetch_data(symbols, start_dt, end_dt)
+            data = self.fetch_data(fetch_symbols, start_dt, end_dt)
 
             if data.empty:
                 return {"status": "error", "message": "No market data", "cycle_id": cycle_id}
@@ -651,7 +731,7 @@ class Orchestrator:
             if alpha_result["status"] != "success":
                 return {"status": "error", "message": f"Alpha failed: {alpha_result.get('message')}", "cycle_id": cycle_id}
 
-            # 3. Risk assessment
+            # 3. Risk assessment (on candidates only for performance)
             risk_result = self.risk_agent.generate_risk_signals_from_data(test_data)
 
             # 4. Extract per-symbol scores from alpha signals
@@ -675,13 +755,11 @@ class Orchestrator:
             if journal:
                 journal.log_signals(symbol_scores, risk_level)
 
-            # 6. Get current positions from Alpaca and real-time prices for order sizing
+            # 6. Get current positions from Alpaca
             current_positions: Dict[str, float] = {}
-            market_prices: Dict[str, float] = {}
             if alpaca_service:
                 try:
-                    positions = alpaca_service.get_positions()
-                    for p in positions:
+                    for p in alpaca_service.get_positions():
                         sym = getattr(p, "symbol", "")
                         if sym:
                             current_positions[sym] = float(getattr(p, "market_value", 0))
@@ -689,10 +767,11 @@ class Orchestrator:
                 except Exception as e:
                     logger.warning("Failed to get Alpaca positions: %s", e)
 
-            # Use real-time prices for accurate order sizing (not yesterday's close)
-            market_prices = self.fetch_realtime_prices(symbols)
+            # 7. Real-time prices (only for symbols in target_weights + current positions)
+            all_active = list(set(list(target_weights.keys()) + list(current_positions.keys())))
+            market_prices = self.fetch_realtime_prices(all_active) if all_active else {}
 
-            # 7. Generate orders from weight diffs
+            # 8. Generate orders from weight diffs
             orders = generate_orders(
                 target_weights=target_weights,
                 current_positions=current_positions,
@@ -708,7 +787,7 @@ class Orchestrator:
             if journal:
                 journal.log_decisions(decisions)
 
-            # 8. Execute orders
+            # 9. Execute orders
             execution_results: List[Dict[str, Any]] = []
             if orders:
                 execution_results = self.execution_agent.execute_orders_direct(orders)
@@ -727,6 +806,8 @@ class Orchestrator:
                 "status": "success",
                 "cycle_id": cycle_id,
                 "market_status": market_status,
+                "universe_size": len(symbols),
+                "screened_to": len(fetch_symbols),
                 "signals": symbol_scores,
                 "risk_level": risk_level,
                 "target_weights": target_weights,
@@ -755,10 +836,14 @@ class Orchestrator:
         journal = TradeJournal()
         cycle = 0
 
+        symbol_display = ", ".join(symbols) if len(symbols) <= 15 else \
+            f"{', '.join(symbols[:10])} ... (+{len(symbols) - 10} more)"
+
         print("\n" + "=" * 60)
         print("  LIANGHUA Auto Trading System - LIVE PAPER")
         print("=" * 60)
-        print(f"  Symbols:     {', '.join(symbols)}")
+        print(f"  Universe:    {len(symbols)} stocks")
+        print(f"                {symbol_display}")
         print(f"  Interval:    {interval_seconds}s")
         print(f"  Capital:     ${total_capital:,.0f}")
         print(f"  MaxPositions: {max_positions}")
