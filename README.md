@@ -1,43 +1,67 @@
 # lianghua
 
-一个以多 Agent 协作为核心的量化研究项目，当前代码以 `agent_pools` 为主。
+基于多 Agent 协作的量化投研系统，覆盖 Alpha 信号挖掘、风险控制、组合优化、回测执行到纸交易的全流程。
 
-## 项目目标
+## 架构概览
 
-- 统一管理理论驱动、实证挖掘、自主发现三类 Alpha Agent
-- 提供风控、组合、回测等下游模块
-- 支持基于 OpenAI Agents SDK / MCP / A2A 的实验性编排
+```text
+                    ┌──────────────────────────────┐
+                    │     Orchestrator (编排层)      │
+                    └──────────┬───────────────────┘
+           ┌───────────────────┼───────────────────┐
+           ▼                   ▼                   ▼
+   ┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+   │  Alpha Agent  │   │  Risk Agent   │   │ Portfolio     │
+   │  (信号生成)    │   │  (风险控制)    │   │ Agent (组合)  │
+   └───────┬───────┘   └───────────────┘   └───────────────┘
+           │                                           │
+           ▼                                           ▼
+   ┌───────────────┐                           ┌───────────────┐
+   │  Backtest     │                           │  Execution    │
+   │  Agent (回测)  │                           │  Agent (执行)  │
+   └───────────────┘                           └───────────────┘
+           │                                           │
+           └───────────────┬───────────────────────────┘
+                           ▼
+           ┌───────────────────────────────┐
+           │  Memory System (记忆系统)       │
+           │  Neo4j + ChromaDB + MCP/A2A    │
+           └───────────────────────────────┘
+```
 
-## 当前目录结构（与仓库一致）
+## 目录结构
 
 ```text
 lianghua/
 ├── agent_pools/
-│   ├── agents/
-│   │   ├── agent_manager.py
-│   │   ├── theory_driven/      # momentum / mean_reversion / a2a_client
-│   │   ├── empirical/          # data_mining / ml_pattern
-│   │   ├── autonomous/         # autonomous_agent
-│   │   └── adapters/           # a2a/mcp/storage/feature 适配层
-│   ├── alpha_agent_pool/       # AlphaSignalAgent（Qlib + ML）
-│   ├── risk_agent_demo/        # RiskSignalAgent 与示例
-│   ├── portfolio_agent_demo/   # PortfolioAgent 与示例结果
-│   ├── backtest_agent_pool/    # BacktestAgent（Qlib回测）
-│   └── qlib_local/             # 本地Qlib数据与完整框架
-├── orchestrator_demo/          # 多Agent编排示例
-├── examples/
-├── data/
-├── knowledge/
-├── logs/
-├── scripts/
-├── tests/
+│   ├── alpha_agent_pool/       # Alpha 信号 Agent（核心：Qlib + ML 因子挖掘）
+│   │   ├── agents/             # theory_driven / empirical / autonomous 三类 Agent
+│   │   ├── adapters/           # A2A / MCP / storage / feature 适配层
+│   │   └── schema/             # 信号与策略数据模型
+│   ├── risk_agent_demo/        # 风控信号 Agent
+│   ├── portfolio_agent_demo/   # 投资组合 Agent
+│   ├── backtest_agent_pool/    # 回测 Agent（Qlib 回测框架）
+│   ├── execution_agent_demo/   # 执行 Agent（Alpaca 纸交易）
+│   ├── qlib_local/             # Qlib 本地模型训练与策略执行
+│   └── memory/                 # 记忆系统（Neo4j 图记忆 + ChromaDB 向量库）
+├── orchestrator_demo/          # 多 Agent 编排器
+├── knowledge/                  # RAG 知识库（ChromaDB + 量化知识文档）
+├── data/                       # Tushare 数据拉取
+├── trade_journals/             # 纸交易日志
+├── run_paper_trading.py        # 纸交易运行器（回测/单次/连续模式）
 ├── requirements.txt
 └── pyproject.toml
 ```
 
-## 环境准备
+## 快速开始
 
-推荐 Python 3.10+。
+### 环境要求
+
+- Python 3.10+
+- Neo4j（可选，用于图记忆）
+- Redis（可选，用于流处理）
+
+### 安装
 
 ```bash
 python -m venv .venv
@@ -45,60 +69,82 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-部分模块还需要额外依赖（按需安装）：
+### 配置
 
 ```bash
-pip install openai-agents-sdk a2a python-dotenv
+cp .env.example .env
 ```
 
-可选环境变量：
+编辑 `.env` 填写必要配置：
 
-- `OPENAI_API_KEY`
-- `ALPACA_API_KEY`
-- `ALPACA_SECRET_KEY`
+| 变量 | 说明 |
+|------|------|
+| `POE_API_KEY` | Poe API 密钥（LLM 调用） |
+| `POE_MODEL` | 模型选择，默认 `GPT-5.4` |
+| `TUSHARE_TOKEN` | Tushare 数据源 token |
+| `RAG_ENABLE` | 是否启用 RAG，默认 `true` |
 
-## 快速运行（按模块）
-
-### 1) 风险 Agent Demo
+### 运行
 
 ```bash
+# 纸交易 — 回测模式
+python run_paper_trading.py --mode backtest --symbol AAPL,MSFT --start 2024-01-01 --end 2024-03-01
+
+# 纸交易 — 单次执行
+python run_paper_trading.py --mode once --symbol AAPL,MSFT,GOOGL
+
+# 纸交易 — 连续自动交易（每 300 秒）
+python run_paper_trading.py --mode continuous --symbol AAPL,MSFT,GOOGL,TSLA --interval 300
+
+# 风险 Agent Demo
 python agent_pools/risk_agent_demo/example_usage.py
-python agent_pools/risk_agent_demo/test_with_real_data.py
-```
 
-### 2) Qlib 本地完整框架 Demo
-
-```bash
+# Qlib 本地完整流程
 python agent_pools/qlib_local/comprehensive_demo.py
-python agent_pools/qlib_local/enhanced_visualization_demo.py
 ```
 
-### 3) Autonomous Agent（MCP Server）
+## 核心模块
 
-```bash
-python agent_pools/agents/autonomous/autonomous_agent.py
-```
+### Alpha Agent Pool
 
-## 关键模块说明
+三类 Alpha 挖掘 Agent 的统一管理池：
 
-- `agent_pools/agents/agent_manager.py`
-	- 负责统一初始化与调度：`momentum` / `mean_reversion` / `data_mining` / `ml_pattern` / `autonomous`
-	- 提供 Alpha 研究工作流聚合与性能摘要
+- **theory_driven** — 基于金融理论（动量、均值回复等）的策略研究
+- **empirical** — 数据驱动的因子挖掘与 ML 模式识别
+- **autonomous** — 自主任务分解、代码生成、策略产出
 
-- `agent_pools/agents/theory_driven/momentum_agent.py`
-	- 理论驱动动量研究主模块，包含较完整策略流程与回测更新逻辑
+通过 MCP/A2A 协议对外暴露信号，由 `alpha_pool_gateway.py` 统一接入。
 
-- `agent_pools/agents/autonomous/autonomous_agent.py`
-	- 自主任务分解、代码生成、策略流产出、MCP工具注册
+### Memory System（记忆系统）
 
-## 当前状态与注意事项
+多维度记忆与知识管理：
 
-1. 根目录历史模板仍残留 `src/lianghua_agent` 路径描述；本 README 已按现有实际结构修正。
-2. `orchestrator_demo/orchestrator.py` 依赖 OpenAI Agents SDK 与 Alpaca（可选）；若未安装相关依赖会降级或失败。
-3. `agent_pools/agents/adapters/*` 使用的 `corepkg` 与 `schema` 位于 `agent_pools/alpha_agent_pool/` 目录下，需保证运行时 `PYTHONPATH` 可解析。
+- **Neo4j 图记忆** — 存储 Agent 间关系、策略演化链路
+- **ChromaDB 向量库** — RAG 知识检索，支持量化文档语义搜索
+- **MCP Server** — 标准化记忆读写接口
+- **A2A 协议** — Agent 间记忆共享与协调
 
-## 建议开发顺序
+### Orchestrator（编排器）
 
-1. 先打通 `agent_pools/agents` 的研究链路（5类 alpha agent）
-2. 再补全 execution 侧（ExecutionAgent + 订单状态回传）
-3. 最后做端到端回归测试（alpha → risk → portfolio → backtest）
+串联 Alpha → Risk → Portfolio → Backtest/Execution 全流程，支持单次运行和连续自动交易模式。
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| Agent 框架 | LangChain / LangGraph / CrewAI |
+| LLM | OpenAI API（Poe 代理） |
+| 量化框架 | Qlib（模型训练与回测） |
+| 交易执行 | Alpaca Markets |
+| 数据源 | Tushare |
+| 向量存储 | ChromaDB |
+| 图数据库 | Neo4j |
+| 协议 | MCP / A2A |
+| 流处理 | Redis |
+
+## 开发路线
+
+1. 完善 Alpha Agent 研究链路（三类 Agent 的策略产出与评估）
+2. 补全 Execution Agent（订单管理、持仓同步、异常恢复）
+3. 端到端回归测试（Alpha → Risk → Portfolio → Backtest/Execution）
+4. 记忆系统深度整合（跨 Agent 经验共享与策略进化）
