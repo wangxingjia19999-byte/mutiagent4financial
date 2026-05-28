@@ -51,9 +51,14 @@ lianghua/
 │   ├── backtest_agent_pool/      # 回测 Agent（Qlib 回测框架）
 │   ├── execution_agent_demo/     # 执行 Agent（Alpaca 纸交易）
 │   ├── qlib_local/               # Qlib 本地模型训练与策略执行
-│   └── memory/                   # 记忆系统（Neo4j 图记忆 + ChromaDB 向量库）
+│   └── memory/                   # 记忆系统（Neo4j 图记忆 + ChromaDB RAG）
+│       ├── agent_memory_client.py # Agent 记忆客户端（Neo4j 图存储）
+│       ├── agent_rag_client.py   # Agent RAG 客户端（PDF 论文检索）
+│       ├── database.py           # Neo4j 异步数据库操作
+│       ├── memory_server.py      # MCP 协议记忆服务
+│       └── unified_database_manager.py  # 统一数据库管理器
 ├── orchestrator_demo/            # 多 Agent 编排器
-├── knowledge/                    # RAG 知识库（ChromaDB + 量化知识文档）
+├── knowledge/                    # RAG 知识文档（1601.00991v3.pdf Alpha101 论文）
 ├── data/                         # 数据拉取（Tushare + 缓存）
 ├── trade_journals/               # 纸交易日志
 ├── run_paper_trading.py          # 纸交易运行器（回测/单次/连续模式）
@@ -97,8 +102,9 @@ cp .env.example .env
 ### 运行
 
 ```bash
-# ── 全市场交易 ──
-# 回测 S&P 500 级别（~500 只股票）
+# ── 主入口：run_paper_trading.py ──
+
+# 回测 S&P 500 级别（~500 只股票，含 RAG + 记忆）
 python run_paper_trading.py --mode backtest --universe sp500 --start 2024-01-01 --end 2024-03-01
 
 # 全市场单次实时交易（~2000 只流动性好的股票）
@@ -107,15 +113,19 @@ python run_paper_trading.py --mode once --universe liquid
 # 全市场连续自动交易
 python run_paper_trading.py --mode continuous --universe nasdaq100 --interval 300
 
-# ── 手工指定股票 ──
+# 手工指定股票回测
 python run_paper_trading.py --mode backtest --symbol AAPL,MSFT,GOOGL --start 2024-01-01 --end 2024-03-01
 
-# ── 全量无筛选（谨慎使用，API 调用量大）──
-python run_paper_trading.py --mode once --universe all --no-filter
+# 滚动周回测
+python run_paper_trading.py --mode backtest --symbol AAPL,MSFT --start 2024-01-01 --end 2024-03-01 --rolling
+
+# 禁用 RAG 或记忆
+python run_paper_trading.py --mode backtest --universe sp500 --no-rag --no-memory
 
 # ── 子模块 Demo ──
-python agent_pools/risk_agent_demo/example_usage.py
-python agent_pools/qlib_local/comprehensive_demo.py
+python agent_pools/alpha_agent_pool/alpha_research_agent.py  # Alpha 因子研究（含 RAG + 记忆）
+python agent_pools/risk_agent_demo/example_usage.py           # 风控 Agent 示例
+python agent_pools/qlib_local/comprehensive_demo.py           # Qlib 本地模型 Demo
 ```
 
 `--universe` 参数说明：
@@ -156,9 +166,11 @@ Orchestrator 在全市场实时模式下自动执行两阶段筛选：
 
 ### Memory System（记忆系统）
 
-- **Neo4j 图记忆** — 存储 Agent 间关系、策略演化链路
-- **ChromaDB 向量库** — RAG 知识检索，支持量化文档语义搜索
+- **Neo4j 图记忆** — 存储 Agent 间关系、策略演化链路、反思/教训
+- **ChromaDB RAG** — 基于 Alpha101 论文 (1601.00991v3.pdf) 的向量检索，Agent 可实时查询量化因子构建方法
 - **MCP / A2A 协议** — Agent 间标准化通信与记忆共享
+
+Agent 通过 [agent_pools/memory/agent_memory_client.py](agent_pools/memory/agent_memory_client.py) 和 [agent_pools/memory/agent_rag_client.py](agent_pools/memory/agent_rag_client.py) 直接调用记忆与 RAG 功能，无需启动额外服务。
 
 ## 交易模式
 

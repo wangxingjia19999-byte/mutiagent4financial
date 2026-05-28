@@ -15,3 +15,6 @@ rich>=13.0.0
 crewai>=0.95.0
 neo4j>=5.14.1
 redis>=5.0.1
+pypdf>=4.0.0
+langchain-text-splitters>=0.3.0
+nest-asyncio>=1.6.0

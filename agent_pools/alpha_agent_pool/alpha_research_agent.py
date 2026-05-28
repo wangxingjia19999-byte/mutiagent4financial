@@ -8,14 +8,38 @@ import json
 from typing import Dict, List, Any, Optional
 from datetime import datetime
 import pandas as pd
+import numpy as np
 from pydantic import BaseModel
 
 # Local Agents SDK imports
 from local_agents import Agent, function_tool
 
-# 导入工具包
-from alpha_analysis_toolkit import AlphaAnalysisToolkit
-from alpha_visualization_toolkit import AlphaVisualizationToolkit
+# Toolkit imports (optional, with stubs for offline use)
+try:
+    from alpha_analysis_toolkit import AlphaAnalysisToolkit
+except ImportError:
+    class AlphaAnalysisToolkit:
+        @staticmethod
+        def load_asset_data(path, data_format="csv"):
+            return pd.read_csv(path)
+        @staticmethod
+        def preprocess_data(data, qlib_format=False):
+            return data
+        @staticmethod
+        def calculate_technical_indicators(data):
+            return {"rsi": 50, "macd": 0, "bollinger_position": 0.5}
+        @staticmethod
+        def generate_alpha_signals(data):
+            return {"momentum_signal": 0.1, "reversal_signal": -0.05}
+        @staticmethod
+        def calculate_risk_metrics(data):
+            return {"volatility": 0.2, "sharpe_ratio": 0.8, "max_drawdown": -0.15}
+
+try:
+    from alpha_visualization_toolkit import AlphaVisualizationToolkit
+except ImportError:
+    class AlphaVisualizationToolkit:
+        pass
 
 
 # ============================================================================
@@ -24,34 +48,31 @@ from alpha_visualization_toolkit import AlphaVisualizationToolkit
 
 class FactorPerformance(BaseModel):
     """Expected factor performance"""
+    model_config = {"extra": "forbid"}
+
     market_regime: str
     confidence_level: float
     expected_sharpe: float
 
-    class Config:
-        extra = "forbid"
-
 
 class FactorProposal(BaseModel):
     """Single factor proposal"""
+    model_config = {"extra": "forbid"}
+
     factor_name: str
     description: str
     formula: str
     justification: str
     expected_performance: FactorPerformance
 
-    class Config:
-        extra = "forbid"
-
 
 class AlphaFactorResponse(BaseModel):
     """Structured response for factor proposals"""
+    model_config = {"extra": "forbid"}
+
     factor_proposals: List[FactorProposal]
     market_summary: str
     risk_assessment: str
-
-    class Config:
-        extra = "forbid"
 
 
 # ============================================================================
@@ -107,17 +128,12 @@ def store_agent_reflection(ctx: AlphaResearchContext, strategy_name: str, issue:
     """Store a learned lesson into the Neo4j Long-term memory graph."""
     start = datetime.now()
     try:
-        import sys, os
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        if project_root not in sys.path:
-            sys.path.append(project_root)
-            
-        from knowledge.neo4j_memory import Neo4jMemoryClient
-        
-        client = Neo4jMemoryClient()
+        from agent_pools.memory.agent_memory_client import AgentMemoryClient
+
+        client = AgentMemoryClient()
         result = client.store_reflection(agent_name="AlphaResearchAgent", strategy_name=strategy_name, issue=issue, lesson_learned=lesson)
         client.close()
-        
+
         ctx.log_function_call("store_agent_reflection", {"strategy": strategy_name}, result, (datetime.now() - start).total_seconds())
         return result
     except Exception as e:
@@ -128,22 +144,17 @@ def query_past_agent_lessons(ctx: AlphaResearchContext, keyword: str):
     """Query past lessons from Neo4j Long-term memory using a keyword like 'overfitting'."""
     start = datetime.now()
     try:
-        import sys, os
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        if project_root not in sys.path:
-            sys.path.append(project_root)
-            
-        from knowledge.neo4j_memory import Neo4jMemoryClient
-        
-        client = Neo4jMemoryClient()
+        from agent_pools.memory.agent_memory_client import AgentMemoryClient
+
+        client = AgentMemoryClient()
         lessons = client.retrieve_lessons_by_issue(keyword)
         client.close()
-        
+
         if not lessons:
             result = f"No past lessons found for keyword: {keyword}"
         else:
             result = "Past lessons:\n" + "\n".join(lessons)
-            
+
         ctx.log_function_call("query_past_agent_lessons", {"keyword": keyword}, result, (datetime.now() - start).total_seconds())
         return result
     except Exception as e:
@@ -151,26 +162,20 @@ def query_past_agent_lessons(ctx: AlphaResearchContext, keyword: str):
 
 @function_tool
 def retrieve_alpha_factors_from_kb(ctx: AlphaResearchContext, query: str, top_k: int = 3):
-    """Retrieve relevant quantitative factors from the knowledge base using RAG/VectorDB."""
+    """Retrieve relevant alpha factor research from the Alpha101 paper using RAG/VectorDB."""
     start = datetime.now()
     try:
-        import sys
-        import os
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        if project_root not in sys.path:
-            sys.path.append(project_root)
-            
-        from knowledge.rag_client import FactorRAGClient
-        
-        rag_client = FactorRAGClient()
-        results = rag_client.query(query, n_results=top_k)
-        
+        from agent_pools.memory.agent_rag_client import get_rag_client
+
+        rag = get_rag_client()
+        results = rag.query(query, n_results=top_k)
+
         if not results:
-            summary = "No matching factors found in the knowledge base."
+            summary = "No matching research found in the knowledge base."
         else:
-            summary = f"Found {len(results)} referring factors:\n\n" + "\n\n".join(results)
-            
-        ctx.log_function_call("retrieve_alpha_factors_from_kb", {"query": query, "top_k": top_k}, summary, 
+            summary = f"Found {len(results)} relevant passages from Alpha101 paper:\n\n" + "\n\n".join(results)
+
+        ctx.log_function_call("retrieve_alpha_factors_from_kb", {"query": query, "top_k": top_k}, summary,
                               (datetime.now() - start).total_seconds())
         return summary
     except ImportError as e:
@@ -224,7 +229,7 @@ def load_qlib_factors(ctx: AlphaResearchContext,
 
     start_time = datetime.now()
     try:
-        provider_uri = "/content/AgenticTradng/qlib_data/stock_custom_day"
+        provider_uri = os.getenv("QLIB_PROVIDER_URI", os.path.expanduser("~/qlib_data/stock_custom_day"))
         feats_dir = os.path.join(provider_uri, "features")
         inst_list = sorted([d for d in os.listdir(feats_dir)
                             if os.path.isdir(os.path.join(feats_dir, d))])
@@ -341,13 +346,19 @@ You are a professional quantitative research assistant. You can call the followi
 - load_qlib_factors
 - propose_alpha_factors
 - generate_iteration_report
-Please perform a full alpha research workflow.
+- store_agent_reflection (save lessons learned to long-term memory)
+- query_past_agent_lessons (search past lessons by keyword)
+- retrieve_alpha_factors_from_kb (search the Alpha101 paper via RAG)
+Please perform a full alpha research workflow. Use the memory tools to persist insights and the RAG tool to reference the Alpha101 paper.
 """,
             tools=[
                 load_and_analyze_data,
                 load_qlib_factors,
                 propose_alpha_factors,
                 generate_iteration_report,
+                store_agent_reflection,
+                query_past_agent_lessons,
+                retrieve_alpha_factors_from_kb,
             ],
         )
 
@@ -438,21 +449,117 @@ Perform a complete alpha research on {csv_path}, including:
 # Main Entry Point
 # ============================================================================
 
-def main():
-    """Test entry point"""
-    import qlib
-    qlib.init(provider_uri="/content/AgenticTradng/qlib_data/stock_custom_day", region="us")
-    agent = AlphaResearchAgent()
-    report = agent.run_complete_workflow(
-        "/content/AgenticTradng/qlib_data/stock_backup/XOM_daily.csv",
-        user_input="Perform technical analysis and factor proposal"
-    )
+SAMPLE_DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_data")
 
-    # Print final report
-    print("\n\n============================")
-    print("Final Combined Report (with LLM Summary)")
-    print("============================\n")
-    print(report)
+
+def _ensure_sample_data() -> str:
+    """Create sample OHLCV data for demo purposes if no real data available."""
+    os.makedirs(SAMPLE_DATA_DIR, exist_ok=True)
+    sample_path = os.path.join(SAMPLE_DATA_DIR, "sample_stock.csv")
+
+    if not os.path.exists(sample_path):
+        print("Creating sample stock data for demo...")
+        dates = pd.date_range("2023-01-01", periods=252, freq="B")
+        np.random.seed(42)
+        returns = np.random.normal(0.0005, 0.015, len(dates))
+        prices = 100 * np.cumprod(1 + returns)
+        volume = np.random.lognormal(10, 0.8, len(dates)).astype(int)
+
+        df = pd.DataFrame({
+            "date": dates,
+            "open": prices * (1 + np.random.normal(0, 0.003, len(dates))),
+            "high": prices * (1 + np.abs(np.random.normal(0, 0.008, len(dates)))),
+            "low": prices * (1 - np.abs(np.random.normal(0, 0.008, len(dates)))),
+            "close": prices,
+            "volume": volume,
+        })
+        df.to_csv(sample_path, index=False)
+        print(f"Sample data saved to {sample_path}")
+
+    return sample_path
+
+
+def demo_rag():
+    """Demo RAG retrieval from the Alpha101 paper."""
+    print("\n" + "=" * 60)
+    print("Demo: RAG Knowledge Base (Alpha101 Paper)")
+    print("=" * 60)
+    try:
+        from agent_pools.memory.agent_rag_client import get_rag_client
+        rag = get_rag_client()
+        queries = [
+            "How to construct alpha factors from price and volume data?",
+            "What is the Sharpe ratio of the top performing factors?",
+        ]
+        for q in queries:
+            print(f"\nQuery: {q}")
+            results = rag.query(q, n_results=2)
+            for i, r in enumerate(results, 1):
+                print(f"  Result {i}: {r[:200]}...")
+    except Exception as e:
+        print(f"  RAG demo skipped: {e}")
+
+
+def demo_memory():
+    """Demo Neo4j memory storage and retrieval."""
+    print("\n" + "=" * 60)
+    print("Demo: Agent Memory System (Neo4j)")
+    print("=" * 60)
+    try:
+        from agent_pools.memory.agent_memory_client import AgentMemoryClient
+        client = AgentMemoryClient()
+        client.store_reflection(
+            agent_name="AlphaResearchAgent",
+            strategy_name="momentum_factor_v1",
+            issue="overfitting on small sample",
+            lesson_learned="Use walk-forward validation and require at least 500 data points",
+        )
+        print("  Stored reflection: momentum_factor_v1 overfitting lesson")
+
+        lessons = client.retrieve_lessons_by_issue("overfitting")
+        print(f"  Retrieved {len(lessons)} lessons about 'overfitting':")
+        for l in lessons:
+            print(f"    - {l[:150]}...")
+        client.close()
+    except Exception as e:
+        print(f"  Memory demo skipped (Neo4j not running): {e}")
+
+
+def demo_agent_workflow(csv_path: str):
+    """Demo the full AlphaResearchAgent workflow."""
+    print("\n" + "=" * 60)
+    print("Demo: Alpha Research Agent Workflow")
+    print("=" * 60)
+    agent = AlphaResearchAgent()
+    result = agent.run_analysis_sync(
+        f"Load data from {csv_path}, analyze it, "
+        f"query the knowledge base for 'momentum factor construction', "
+        f"and store a reflection about what you learned."
+    )
+    print(f"\nAgent result:\n{result[:1000]}")
+
+
+def main():
+    """Main entry point - runs demos of the full system with memory and RAG."""
+    print("=" * 60)
+    print("  Lianghua - Alpha Research Agent Demo")
+    print("  Memory + RAG Integration")
+    print("=" * 60)
+
+    csv_path = _ensure_sample_data()
+
+    # Demo 1: RAG from Alpha101 paper
+    demo_rag()
+
+    # Demo 2: Memory system (requires Neo4j, will skip gracefully)
+    demo_memory()
+
+    # Demo 3: Full agent workflow
+    demo_agent_workflow(csv_path)
+
+    print("\n" + "=" * 60)
+    print("  Demo complete!")
+    print("=" * 60)
 
 
 if __name__ == "__main__":

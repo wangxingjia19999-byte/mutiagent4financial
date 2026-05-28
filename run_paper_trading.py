@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Paper Trading Runner — backtest, single cycle, or continuous auto-trading via Alpaca.
+Paper Trading Runner - backtest, single cycle, or continuous auto-trading via Alpaca.
 
 Usage:
     # Full-market trading (auto-fetch all liquid stocks)
@@ -11,6 +11,9 @@ Usage:
     # Manual symbol list
     python run_paper_trading.py --mode backtest --symbol AAPL,MSFT,GOOGL --start 2024-01-01 --end 2024-03-01
     python run_paper_trading.py --mode once --symbol AAPL,MSFT,GOOGL
+
+    # Disable RAG or memory
+    python run_paper_trading.py --mode backtest --universe sp500 --no-rag --no-memory
 """
 
 import argparse
@@ -38,12 +41,192 @@ from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent impor
     alpaca_service,
 )
 
-
-# Ensure project root is on path for market_universe import
+# Ensure project root is on path for imports
 _project_root = Path(__file__).resolve().parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# RAG & Memory Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_rag_client = None
+_memory_client = None
+
+
+def _init_rag(enable: bool = True):
+    """Initialize RAG client and pre-build the vector index."""
+    global _rag_client
+    if not enable:
+        return None
+    try:
+        from agent_pools.memory.agent_rag_client import get_rag_client
+        _rag_client = get_rag_client()
+        return _rag_client
+    except Exception as e:
+        print(f"  [RAG] Init failed: {e}")
+        return None
+
+
+def _init_memory(enable: bool = True):
+    """Initialize Neo4j memory client."""
+    global _memory_client
+    if not enable:
+        return None
+    try:
+        from agent_pools.memory.agent_memory_client import AgentMemoryClient
+        _memory_client = AgentMemoryClient()
+        return _memory_client
+    except Exception as e:
+        print(f"  [Memory] Init failed: {e}")
+        return None
+
+
+def _close_memory():
+    global _memory_client
+    if _memory_client:
+        try:
+            _memory_client.close()
+        except Exception:
+            pass
+        _memory_client = None
+
+
+def _rag_query(query: str, top_k: int = 3) -> str:
+    """Query the RAG knowledge base, return formatted string."""
+    if not _rag_client:
+        return ""
+    try:
+        results = _rag_client.query(query, n_results=top_k)
+        if not results:
+            return ""
+        return "\n".join(results)
+    except Exception:
+        return ""
+
+
+def _memory_store(strategy_name: str, issue: str, lesson: str):
+    """Store a reflection into Neo4j memory."""
+    if not _memory_client:
+        return
+    try:
+        _memory_client.store_reflection(
+            agent_name="PaperTrading",
+            strategy_name=strategy_name,
+            issue=issue,
+            lesson_learned=lesson,
+        )
+    except Exception:
+        pass
+
+
+def _memory_lessons(keyword: str) -> list:
+    """Query past lessons from Neo4j memory."""
+    if not _memory_client:
+        return []
+    try:
+        return _memory_client.retrieve_lessons_by_issue(keyword)
+    except Exception:
+        return []
+
+
+def _rag_context_for_mode(mode: str, symbols_count: int) -> str:
+    """Build a RAG query string based on the trading mode and parameters."""
+    if mode == "backtest":
+        return (
+            f"factor construction methodology backtesting {symbols_count} stocks "
+            f"time series analysis statistical significance"
+        )
+    else:
+        return (
+            f"real-time factor trading execution {symbols_count} stocks "
+            f"risk management portfolio construction"
+        )
+
+
+def _build_rag_summary(mode: str, symbols_count: int) -> str:
+    """Query RAG and return a formatted summary for the agent pipeline."""
+    query = _rag_context_for_mode(mode, symbols_count)
+    raw = _rag_query(query, top_k=3)
+    if not raw:
+        return ""
+    # Parse each result block: "[source]:\ncontent\n\n[source]:\ncontent\n\n..."
+    import re
+    blocks = re.split(r"\n(?=\[)", raw.strip())
+    summary_lines = []
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+        # Remove the "[source]:" header line, keep the content
+        lines = block.split("\n", 1)
+        if len(lines) > 1:
+            content = lines[1].strip()[:300]
+        else:
+            content = lines[0].strip()[:300]
+        if content:
+            summary_lines.append(f"  - {content}")
+    if summary_lines:
+        return "Alpha101 Research Insights:\n" + "\n".join(summary_lines[:5])
+    return ""
+
+
+def _store_pipeline_reflections(mode: str, result: dict, symbols_count: int):
+    """Store meaningful lessons based on pipeline results."""
+    if not _memory_client:
+        return
+
+    status = result.get("status", "unknown")
+
+    if status == "success":
+        metrics = result.get("performance_metrics", {})
+        sharpe = metrics.get("sharpe_ratio", 0)
+        ret = metrics.get("total_return", 0)
+        mdd = metrics.get("max_drawdown", 0)
+
+        if sharpe > 1.0:
+            _memory_store(
+                f"{mode}_pipeline",
+                "strong_performance",
+                f"Sharpe={sharpe:.2f} Return={ret:.2%} on {symbols_count} stocks - "
+                f"strategy construction approach is effective",
+            )
+        elif sharpe < 0:
+            _memory_store(
+                f"{mode}_pipeline",
+                "negative_sharpe",
+                f"Sharpe={sharpe:.2f} Return={ret:.2%} on {symbols_count} stocks - "
+                f"needs better factor selection or risk control",
+            )
+
+        if mdd < -0.3:
+            _memory_store(
+                f"{mode}_pipeline",
+                "large_drawdown",
+                f"MaxDrawdown={mdd:.2%} on {symbols_count} stocks - "
+                f"add stop-loss or reduce position size during high volatility",
+            )
+
+        # Store general cycle info
+        _memory_store(
+            f"{mode}_pipeline",
+            f"cycle_completed",
+            f"Completed {mode} cycle on {symbols_count} stocks. "
+            f"Sharpe={sharpe:.2f} Return={ret:.2%} MDD={mdd:.2%} "
+            f"Risk={result.get('risk_level', '?')}",
+        )
+
+    elif status == "error":
+        _memory_store(
+            f"{mode}_pipeline",
+            "pipeline_error",
+            f"Error: {result.get('message', 'unknown')} on {symbols_count} stocks",
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Symbol Resolution
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def resolve_symbols(args) -> list:
     """Resolve the symbol list from --universe or --symbol."""
@@ -62,6 +245,35 @@ def resolve_symbols(args) -> list:
         return symbols
 
     return [s.strip() for s in args.symbol.split(",")]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Display Helpers
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def print_banner(args, symbols, rag_enabled, memory_enabled):
+    """Print the system startup banner with RAG & Memory status."""
+    print("=" * 55)
+    print("  LIANGHUA Paper Trading System")
+    print("=" * 55)
+    print(f"  Mode:         {args.mode.upper()}")
+    print(f"  Symbols:      {len(symbols)} stocks")
+    if len(symbols) <= 20:
+        print(f"                {', '.join(symbols)}")
+    else:
+        print(f"                {', '.join(symbols[:10])} ... (+{len(symbols) - 10} more)")
+    print(f"  Capital:      ${args.capital:,.0f}")
+    if args.mode == "backtest":
+        print(f"  Period:       {args.start} -> {args.end}")
+        if args.rolling:
+            print(f"  Method:       Rolling Weekly")
+    elif args.mode == "continuous":
+        print(f"  Interval:     {args.interval}s")
+    print(f"  MaxPositions: {args.max_positions}")
+    print("-" * 55)
+    print(f"  RAG:          {'ONLINE' if rag_enabled else 'OFF'}")
+    print(f"  Memory:       {'ONLINE' if memory_enabled else 'OFF'}")
+    print("=" * 55)
 
 
 def print_backtest_result(result):
@@ -180,6 +392,23 @@ def show_account():
         print(f"  Could not fetch account: {e}")
 
 
+def print_memory_summary():
+    """Print memory system summary."""
+    if not _memory_client:
+        return
+    try:
+        stats = _memory_client.get_statistics()
+        total = stats.get("total_memories", 0)
+        if total > 0:
+            print(f"\n  [Memory] {total} total memories stored")
+    except Exception:
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Main
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def main():
     parser = argparse.ArgumentParser(description="LIANGHUA Paper Trading System")
 
@@ -227,37 +456,64 @@ def main():
         "--rolling", action="store_true",
         help="Use rolling weekly inference in backtest mode.",
     )
+    parser.add_argument(
+        "--no-rag", action="store_true",
+        help="Disable RAG knowledge base queries.",
+    )
+    parser.add_argument(
+        "--no-memory", action="store_true",
+        help="Disable Neo4j memory storage/retrieval.",
+    )
 
     args = parser.parse_args()
     symbols = resolve_symbols(args)
 
-    print("=" * 50)
-    print("  LIANGHUA Paper Trading System")
-    print("=" * 50)
-    print(f"  Mode:         {args.mode.upper()}")
-    print(f"  Symbols:      {len(symbols)} stocks")
-    if len(symbols) <= 20:
-        print(f"                {', '.join(symbols)}")
-    else:
-        print(f"                {', '.join(symbols[:10])} ... (+{len(symbols) - 10} more)")
-    print(f"  Capital:      ${args.capital:,.0f}")
-    if args.mode == "backtest":
-        print(f"  Period:       {args.start} -> {args.end}")
-        if args.rolling:
-            print(f"  Method:       Rolling Weekly")
-    elif args.mode == "continuous":
-        print(f"  Interval:     {args.interval}s")
-    print(f"  MaxPositions: {args.max_positions}")
-    print("=" * 50)
+    rag_enabled = not args.no_rag
+    memory_enabled = not args.no_memory
 
-    # Initialize orchestrator
-    print("\nInitializing orchestrator...")
+    print_banner(args, symbols, rag_enabled, memory_enabled)
+
+    # ── Init RAG ──
+    rag_summary = ""
+    if rag_enabled:
+        print("\n  [RAG] Initializing knowledge base ...")
+        if _init_rag(enable=True):
+            print("  [RAG] Querying Alpha101 paper for relevant research ...")
+            rag_summary = _build_rag_summary(args.mode, len(symbols))
+            if rag_summary:
+                print(f"\n{rag_summary}")
+            else:
+                print("  [RAG] No relevant results found.")
+        else:
+            print("  [RAG] Unavailable - continuing without knowledge base.")
+
+    # ── Init Memory ──
+    if memory_enabled:
+        print("\n  [Memory] Initializing Neo4j ...")
+        if _init_memory(enable=True):
+            print("  [Memory] Connected - querying past lessons ...")
+            lessons = _memory_lessons("strategy")
+            if lessons:
+                print(f"  [Memory] Found {len(lessons)} past lessons:")
+                for l in lessons[:3]:
+                    print(f"    - {l[:120]}...")
+            else:
+                print("  [Memory] No past lessons found - starting fresh.")
+        else:
+            print("  [Memory] Unavailable - continuing without memory.")
+
+    # ── Init Orchestrator ──
+    print("\n  Initializing orchestrator (Alpha + Risk + Portfolio + Backtest + Execution) ...")
     orch = Orchestrator()
-    print("Ready.\n")
+    print("  Ready.\n")
 
     # Show account for live modes
     if args.mode in ("once", "continuous"):
         show_account()
+
+    # ═══════════════════════════════════════════════════════════════
+    # Execute
+    # ═══════════════════════════════════════════════════════════════
 
     if args.mode == "backtest":
         if args.rolling:
@@ -276,6 +532,10 @@ def main():
             )
         print_backtest_result(result)
 
+        # Store reflections based on backtest outcome
+        if memory_enabled:
+            _store_pipeline_reflections("backtest", result, len(symbols))
+
     elif args.mode == "once":
         result = orch.run_live_trading_cycle(
             symbols=symbols,
@@ -284,6 +544,9 @@ def main():
         )
         print_once_result(result)
 
+        if memory_enabled:
+            _store_pipeline_reflections("live_once", result, len(symbols))
+
     elif args.mode == "continuous":
         orch.run_live_trading_loop(
             symbols=symbols,
@@ -291,6 +554,10 @@ def main():
             interval_seconds=args.interval,
             max_positions=args.max_positions,
         )
+
+    # ── Final summary ──
+    print_memory_summary()
+    _close_memory()
 
 
 if __name__ == "__main__":

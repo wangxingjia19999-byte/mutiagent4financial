@@ -146,6 +146,47 @@ class Orchestrator:
             except Exception as e:
                 return f"Error: {e}"
 
+        @function_tool
+        def store_reflection(strategy_name: str, issue: str, lesson: str) -> str:
+            """Store a learned lesson into Neo4j long-term memory for future reference."""
+            try:
+                from agent_pools.memory.agent_memory_client import AgentMemoryClient
+                client = AgentMemoryClient()
+                result = client.store_reflection(
+                    agent_name="Orchestrator", strategy_name=strategy_name,
+                    issue=issue, lesson_learned=lesson)
+                client.close()
+                return result
+            except Exception as e:
+                return f"Memory store skipped (Neo4j not available): {e}"
+
+        @function_tool
+        def query_lessons(keyword: str) -> str:
+            """Query past lessons from Neo4j memory. Use keywords like 'overfitting', 'momentum', 'risk'."""
+            try:
+                from agent_pools.memory.agent_memory_client import AgentMemoryClient
+                client = AgentMemoryClient()
+                lessons = client.retrieve_lessons_by_issue(keyword)
+                client.close()
+                if not lessons:
+                    return f"No past lessons found for '{keyword}'."
+                return "Past lessons:\n" + "\n".join(lessons)
+            except Exception as e:
+                return f"Memory query skipped (Neo4j not available): {e}"
+
+        @function_tool
+        def search_knowledge(query: str, top_k: int = 3) -> str:
+            """Search the Alpha101 research paper (RAG) for relevant factor construction knowledge."""
+            try:
+                from agent_pools.memory.agent_rag_client import get_rag_client
+                rag = get_rag_client()
+                results = rag.query(query, n_results=top_k)
+                if not results:
+                    return "No matching research found in the knowledge base."
+                return f"Found {len(results)} relevant passages:\n\n" + "\n\n".join(results)
+            except Exception as e:
+                return f"RAG search skipped: {e}"
+
         # 3. Create Manager Agent with Agents as Tools
         # This matches the "Agent as Tool" pattern from the docs
         
@@ -154,14 +195,19 @@ class Orchestrator:
             instructions=(
                 "You are a trading strategy manager. You use the tools given to you to execute the pipeline. "
                 "1. Fetch data first. "
-                "2. Ask Alpha Agent to analyze. "
-                "3. Ask Risk Agent to assess. "
-                "4. Ask Portfolio Agent to construct portfolio. "
-                "5. Ask Execution Agent to trade OR Backtest Agent to simulate."
+                "2. Search knowledge base (search_knowledge) for relevant factor research before analyzing. "
+                "3. Ask Alpha Agent to analyze. "
+                "4. Ask Risk Agent to assess. "
+                "5. Ask Portfolio Agent to construct portfolio. "
+                "6. Ask Execution Agent to trade OR Backtest Agent to simulate. "
+                "7. Store important lessons learned (store_reflection) to memory for future reference."
             ),
             tools=[
-                # Helper Tool
+                # Helper Tools
                 fetch_market_data,
+                store_reflection,
+                query_lessons,
+                search_knowledge,
                 
                 # Agents as Tools
                 self.alpha_agent.agent.as_tool(
@@ -971,12 +1017,45 @@ class Orchestrator:
         return self.manager_agent.run(user_request, max_turns=10)
 
 if __name__ == "__main__":
+    print("=" * 60)
+    print("  Lianghua Orchestrator Demo")
+    print("  Memory + RAG + Multi-Agent Pipeline")
+    print("=" * 60)
+
     orchestrator = Orchestrator()
-    
-    print("\n--- Agentic Pipeline Demo (Agent-as-Tool Pattern) ---")
-    # Simulate a user request that triggers the agents
-    request = "Fetch data for AAPL, MSFT (2023-01-01 to 2023-06-01) and then ask Alpha Agent to analyze it."
-    
+
+    # Demo 1: RAG knowledge search
+    print("\n--- Demo 1: RAG Knowledge Search ---")
+    try:
+        from agent_pools.memory.agent_rag_client import get_rag_client
+        rag = get_rag_client()
+        results = rag.query("momentum factor construction from price volume", n_results=2)
+        for i, r in enumerate(results, 1):
+            print(f"  Result {i}: {r[:150]}...")
+    except Exception as e:
+        print(f"  RAG skipped: {e}")
+
+    # Demo 2: Memory store/query
+    print("\n--- Demo 2: Memory System ---")
+    try:
+        from agent_pools.memory.agent_memory_client import AgentMemoryClient
+        client = AgentMemoryClient()
+        client.store_reflection(
+            agent_name="Orchestrator",
+            strategy_name="pipeline_v1",
+            issue="overfitting on small universe",
+            lesson_learned="Use at least 100 stocks and walk-forward validation",
+        )
+        print("  Stored reflection: pipeline_v1 overfitting lesson")
+        lessons = client.retrieve_lessons_by_issue("overfitting")
+        print(f"  Retrieved {len(lessons)} lessons")
+        client.close()
+    except Exception as e:
+        print(f"  Memory skipped (Neo4j not running): {e}")
+
+    # Demo 3: Agentic pipeline
+    print("\n--- Demo 3: Agentic Pipeline ---")
+    request = "Search knowledge base for 'momentum factor', then fetch data for AAPL (2023-01-01 to 2023-06-01) and ask Alpha Agent to analyze it."
     result = orchestrator.run_agentic_pipeline(request)
-    print("\nFinal Result:")
-    print(result)
+    print(f"\nPipeline result: {str(result)[:500]}...")
+    print("\nDemo complete.")

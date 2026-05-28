@@ -11,3 +11,6 @@ logs/
 .chroma/
 *.log
 .demo.py
+sample_data/
+agent_logs/
+chroma_rag_db/
