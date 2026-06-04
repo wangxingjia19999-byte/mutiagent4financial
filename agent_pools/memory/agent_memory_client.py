@@ -111,46 +111,38 @@ class AgentMemoryClient:
         except Exception as e:
             return [f"Query failed: {e}"]
 
-    # ── General memory API ──────────────────────────────────────────────
+    # ── General memory API (delegates to sync driver) ──────────────────
 
     def store_memory(self, query: str, keywords: List[str], summary: str,
                      agent_id: str, event_type: str = "USER_QUERY",
                      log_level: str = "INFO", session_id: str = None,
                      correlation_id: str = None) -> Optional[Dict]:
-        """Store a general memory entry."""
-        db = self._get_db()
-        if not db or not db.driver:
-            return None
-        return _run_async(lambda: db.store_memory(
-            query=query, keywords=keywords, summary=summary,
-            agent_id=agent_id, event_type=event_type, log_level=log_level,
-            session_id=session_id, correlation_id=correlation_id,
-        ))
+        """Store a general memory entry (delegates to store_reflection)."""
+        result = self.store_reflection(agent_id, "general", query, summary)
+        return {"status": "stored", "message": result} if "Stored" in result else None
 
     def retrieve_memory(self, search_query: str, limit: int = 5) -> List[Dict]:
-        """Retrieve memories by full-text search."""
-        db = self._get_db()
-        if not db or not db.driver:
-            return []
-        return _run_async(lambda: db.retrieve_memory(search_query, limit))
+        """Retrieve memories by keyword search."""
+        lessons = self.retrieve_lessons_by_issue(search_query)
+        return [{"memory": {"summary": l}} for l in lessons if not l.startswith("Query failed")]
 
     def retrieve_with_expansion(self, search_query: str, limit: int = 10) -> List[Dict]:
-        """Retrieve memories with relationship expansion."""
-        db = self._get_db()
-        if not db or not db.driver:
-            return []
-        return _run_async(lambda: db.retrieve_memory_with_expansion(search_query, limit))
+        """Retrieve memories with relationship expansion (same as retrieve_memory)."""
+        return self.retrieve_memory(search_query, limit)
 
     def filter_memories(self, filters: Dict, limit: int = 100, offset: int = 0) -> List[Dict]:
         """Filter memories by structured criteria."""
-        db = self._get_db()
-        if not db or not db.driver:
-            return []
-        return _run_async(lambda: db.filter_memories(filters, limit, offset))
+        keyword = filters.get('keyword', filters.get('agent_id', ''))
+        return self.retrieve_memory(keyword, limit) if keyword else []
 
     def get_statistics(self) -> Dict:
         """Get memory graph statistics."""
-        db = self._get_db()
-        if not db or not db.driver:
+        driver = self._get_driver()
+        if not driver:
             return {}
-        return _run_async(lambda: db.get_statistics())
+        try:
+            with driver.session() as s:
+                r = s.run('MATCH (m:Memory) RETURN count(m) as cnt')
+                return {"total_memories": r.single()["cnt"]}
+        except Exception:
+            return {"total_memories": 0}

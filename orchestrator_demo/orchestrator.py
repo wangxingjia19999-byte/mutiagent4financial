@@ -692,11 +692,15 @@ class Orchestrator:
             signals_series = pd.Series(predictions_dict)
 
             if not isinstance(signals_series.index, pd.MultiIndex):
+                # Build proper MultiIndex to avoid silently dropping the second level name
                 if len(symbols) == 1:
                     signals_series.index = pd.MultiIndex.from_product(
                         [signals_series.index, [symbols[0]]], names=['datetime', 'instrument'])
                 else:
-                    signals_series.index.names = ['datetime', 'instrument']
+                    # Flat index with multiple symbols — rebuild as MultiIndex
+                    signals_series.index = pd.MultiIndex.from_arrays(
+                        [pd.Index([''] * len(signals_series)), signals_series.index],
+                        names=['datetime', 'instrument'])
             else:
                 signals_series.index.names = ['datetime', 'instrument']
 
@@ -854,7 +858,9 @@ class Orchestrator:
                  if len(symbols) == 1:
                      full_signals_series.index = pd.MultiIndex.from_product([full_signals_series.index, [symbols[0]]], names=['datetime', 'instrument'])
                  else:
-                     full_signals_series.index.names = ['datetime', 'instrument']
+                     full_signals_series.index = pd.MultiIndex.from_arrays(
+                         [pd.Index([''] * len(full_signals_series)), full_signals_series.index],
+                         names=['datetime', 'instrument'])
             else:
                  full_signals_series.index.names = ['datetime', 'instrument']
 

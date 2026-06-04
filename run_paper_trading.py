@@ -21,6 +21,7 @@ import os
 import warnings
 import logging
 import sys
+from typing import List
 import time
 from datetime import datetime
 from pathlib import Path
@@ -252,6 +253,8 @@ def resolve_symbols(args) -> list:
         market = "cn" if args.universe in cn_scopes else args.market
 
         print(f"\n  Fetching market universe: {args.universe} (market={market}) ...")
+
+        symbols = None  # initialize before conditional blocks
 
         # For full-market CN universes, use multi-factor pre-screening
         if args.universe in ("all_cn", "liquid_cn") and not args.no_filter:
