@@ -118,39 +118,97 @@ def _calculate_technical_indicators(data: pd.DataFrame, indicators: List[str]) -
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-def _prepare_features_targets(data: pd.DataFrame, indicators: List[str]) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
-    """Helper to calculate features and targets from raw data."""
+def _prepare_features_targets(
+    data: pd.DataFrame,
+    indicators: Optional[List[str]] = None,
+    use_alpha158: bool = True,
+) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
+    """
+    Calculate features and targets from raw data.
+
+    Two modes:
+      - Alpha158 (default): 200+ factors via Alpha158Calculator (pure pandas, no Qlib)
+      - Legacy: RSI/MACD/Bollinger technical indicators (if use_alpha158=False)
+
+    Features are winsorized at 1%/99% and standardized (z-score) for stable model training.
+    """
     # 1. Preprocessing
     if isinstance(data.index, pd.MultiIndex):
         data = data.reset_index()
     data = data.reset_index(drop=True)
-    
+
     # Normalize columns
     col_map = {c: c.lower() for c in data.columns}
     data = data.rename(columns=col_map)
-    if 'instrument' in data.columns: data = data.rename(columns={'instrument': 'symbol'})
-    if 'datetime' in data.columns: data = data.rename(columns={'datetime': 'date'})
-    
+    if 'instrument' in data.columns:
+        data = data.rename(columns={'instrument': 'symbol'})
+    if 'datetime' in data.columns:
+        data = data.rename(columns={'datetime': 'date'})
+
     if 'close' not in data.columns:
         raise ValueError("Missing close column")
 
-    # 2. Indicators
-    ind_res = _calculate_technical_indicators(data, indicators)
-    features = pd.DataFrame(index=data.index)
-    
-    if ind_res['status'] == 'success':
-        for name, vals in ind_res['indicators'].items():
-            features[name] = pd.Series(vals)
+    # Check for required columns for Alpha158
+    has_ohlcv = all(c in data.columns for c in ['open', 'high', 'low', 'close', 'volume'])
+
+    if use_alpha158 and has_ohlcv:
+        features = _prepare_alpha158_features(data)
     else:
-        raise ValueError(f"Indicator calc failed: {ind_res.get('message')}")
-        
+        if use_alpha158:
+            print("WARNING: Missing OHLCV columns for Alpha158, falling back to legacy indicators.")
+        # Legacy: RSI/MACD/Bollinger
+        ind_res = _calculate_technical_indicators(data, indicators or ['RSI', 'MACD'])
+        features = pd.DataFrame(index=data.index)
+        if ind_res['status'] == 'success':
+            for name, vals in ind_res['indicators'].items():
+                features[name] = pd.Series(vals)
+        else:
+            raise ValueError(f"Indicator calc failed: {ind_res.get('message')}")
+
+    # 2b. Feature preprocessing: winsorize + standardize
+    features = _preprocess_features(features)
+
     # 3. Target (Forward Return)
     if 'symbol' in data.columns:
         targets = data.groupby('symbol')['close'].pct_change().shift(-1)
     else:
         targets = data['close'].pct_change().shift(-1)
-        
+
     return features, targets
+
+
+def _prepare_alpha158_features(data: pd.DataFrame) -> pd.DataFrame:
+    """Compute Alpha158 factors (200+ features) via pure-pandas calculator."""
+    from agent_pools.alpha_agent_demo.alpha158_calculator import Alpha158Calculator
+    calc = Alpha158Calculator()
+    features = calc.compute(data)
+    return features
+
+
+def _preprocess_features(features: pd.DataFrame) -> pd.DataFrame:
+    """
+    Winsorize (clip at 1%/99%) + standardize (z-score) for stable model training.
+    Keeps a copy of original column names.
+    """
+    df = features.copy()
+    # Winsorize: clip extreme values
+    for col in df.columns:
+        lo = df[col].quantile(0.01)
+        hi = df[col].quantile(0.99)
+        if hi > lo:
+            df[col] = df[col].clip(lo, hi)
+
+    # Standardize: z-score
+    for col in df.columns:
+        mean = df[col].mean()
+        std = df[col].std()
+        if std > 1e-8:
+            df[col] = (df[col] - mean) / std
+
+    # Replace any remaining NaN/Inf
+    df = df.fillna(0.0).replace([np.inf, -np.inf], 0.0)
+
+    return df.astype(np.float32)
 
 def _train_model_and_predict(
     X_train: pd.DataFrame, 
@@ -186,7 +244,18 @@ def _train_model_and_predict(
         if model_type == "linear":
             model = LinearRegression()
         elif model_type == "random_forest":
-            model = RandomForestRegressor(n_estimators=50, max_depth=5, random_state=42)
+            model = RandomForestRegressor(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1)
+        elif model_type == "lightgbm":
+            try:
+                import lightgbm as lgb
+                model = lgb.LGBMRegressor(
+                    n_estimators=100, max_depth=6, num_leaves=31,
+                    learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
+                    random_state=42, verbose=-1, n_jobs=-1,
+                )
+            except ImportError:
+                print("WARNING: lightgbm not installed, falling back to random_forest.")
+                model = RandomForestRegressor(n_estimators=100, max_depth=8, random_state=42, n_jobs=-1)
         else:
             return {"status": "error", "message": f"Unknown model {model_type}"}
             
@@ -209,23 +278,28 @@ def _run_alpha_pipeline_impl(
     test_data: pd.DataFrame,
     train_data: Optional[pd.DataFrame],
     factors: List[Dict],
-    indicators: List[str],
+    indicators: Optional[List[str]],
     model_type: str,
     signal_threshold: float,
     data_processor: Any
 ) -> Dict[str, Any]:
-    """Full pipeline implementation (Macro)."""
+    """Full pipeline implementation (Macro) — uses Alpha158 factors by default."""
     try:
         # If no train data provided, fallback to In-Sample (Old behavior) or Error?
         # For backwards compatibility, if train_data is None, split test_data or use it as both (with warning)
         if train_data is None or train_data.empty:
             print("WARNING: No training data provided. Using In-Sample training (Leakage Risk).")
             train_data = test_data
-            
-        # 1. Prepare Features & Targets
+
+        # 1. Prepare Features & Targets — Alpha158 by default
+        use_alpha158 = (indicators is None)  # If no legacy indicators specified, use Alpha158
         try:
-            X_train, y_train = _prepare_features_targets(train_data, indicators)
-            X_test, _ = _prepare_features_targets(test_data, indicators)
+            X_train, y_train = _prepare_features_targets(
+                train_data, indicators=indicators, use_alpha158=use_alpha158
+            )
+            X_test, _ = _prepare_features_targets(
+                test_data, indicators=indicators, use_alpha158=use_alpha158
+            )
         except Exception as e:
             return {"status": "error", "message": f"Feature Prep Failed: {str(e)}"}
             
@@ -282,22 +356,22 @@ def _run_alpha_pipeline_impl(
 @function_tool
 def run_alpha_pipeline(ctx: dict) -> str:
     """
-    Execute the complete standard alpha pipeline (Calculate Indicators -> Train Model -> Generate Signals).
-    Use this for a quick, standard analysis.
+    Execute the complete standard alpha pipeline (Alpha158 Factors -> Train Model -> Generate Signals).
+    Uses 200+ Alpha158 factors by default with LightGBM model.
     """
     print("DEBUG: 🛠️ run_alpha_pipeline (Macro) INVOKED")
     try:
         data = ctx.get('data')      # This is TEST data (current year)
         train_data = ctx.get('train_data') # This is TRAIN data (prev year)
-        
+
         factors = ctx.get('factors', [])
-        indicators = ctx.get('indicators', ['RSI', 'MACD'])
-        model_type = ctx.get('model_type', 'linear')
+        indicators = ctx.get('indicators', None)  # None → Alpha158 mode
+        model_type = ctx.get('model_type', 'lightgbm')
         threshold = ctx.get('signal_threshold', 0.0)
         data_processor = ctx.get('data_processor')
-        
+
         if data is None: return "Error: No test data in context."
-        
+
         result = _run_alpha_pipeline_impl(data, train_data, factors, indicators, model_type, threshold, data_processor)
         ctx['result'] = result
         return f"Pipeline completed. Status: {result.get('status')}"
@@ -330,7 +404,7 @@ def calculate_indicators_tool(ctx: dict, indicators: List[str]) -> str:
         return f"Error: {e}"
 
 @function_tool
-def train_predict_tool(ctx: dict, model_type: str = "linear") -> str:
+def train_predict_tool(ctx: dict, model_type: str = "lightgbm") -> str:
     """
     Train a model using TRAINING data and predict on CURRENT features.
     Requires 'train_data' in context.
@@ -340,17 +414,20 @@ def train_predict_tool(ctx: dict, model_type: str = "linear") -> str:
         test_data = ctx.get('data')
         test_features = ctx.get('features')
         train_data = ctx.get('train_data')
-        indicators = ctx.get('indicators', ['RSI', 'MACD']) # Need to know which indicators used
-        
+        indicators = ctx.get('indicators', None)  # None → Alpha158 mode
+
         if test_features is None or test_features.empty:
             return "Error: Calculate indicators for test data first."
-            
+
         if train_data is None or train_data.empty:
             return "Error: No training data provided for rolling window."
-            
-        # Prepare Train Features (Calculate same indicators on train data)
+
+        # Prepare Train Features (Alpha158 by default)
+        use_alpha158 = (indicators is None)
         try:
-            X_train, y_train = _prepare_features_targets(train_data, indicators)
+            X_train, y_train = _prepare_features_targets(
+                train_data, indicators=indicators, use_alpha158=use_alpha158
+            )
         except Exception as e:
             return f"Error preparing training data: {e}"
             
@@ -442,16 +519,14 @@ class AlphaSignalAgent:
         self.agent = Agent(
             name=name,
             instructions="""
-            You are an Alpha Signal Agent. Your task is to generate trading signals.
+            You are an Alpha Signal Agent. Generate trading signals using Alpha158 factors (200+ features)
+            with LightGBM model.
 
-            IMPORTANT: Always use the FAST PATH first:
-            Call 'run_alpha_pipeline' ONCE. This handles indicator calculation, model training,
-            and signal generation all at once. Do NOT call it more than once.
-
-            Only use the Custom Path (calculate_indicators_tool → train_predict_tool → submit_signals_tool)
-            if the pipeline tool reports an error.
-
-            After receiving a successful result, respond ONLY with the text "DONE".
+            CRITICAL RULES:
+            1. Call 'run_alpha_pipeline' EXACTLY ONCE. This computes everything automatically.
+            2. After run_alpha_pipeline returns, you are DONE. Do NOT call it again.
+            3. Do NOT use calculate_indicators_tool or train_predict_tool unless run_alpha_pipeline fails.
+            4. Respond with ONLY the word "DONE" after a successful pipeline run.
             """,
             model=model,
             tools=self.tools
@@ -463,45 +538,33 @@ class AlphaSignalAgent:
     def generate_signals_from_data(
         self,
         data: pd.DataFrame,
-        factors: List[Dict[str, Any]],
-        indicators: List[str],
-        model_type: str = "linear",
+        factors: Optional[List[Dict[str, Any]]] = None,
+        indicators: Optional[List[str]] = None,
+        model_type: str = "lightgbm",
         signal_threshold: float = 0.0,
         train_data: Optional[pd.DataFrame] = None
     ) -> Dict[str, Any]:
         """
-        Generate signals using LLM-based execution.
+        Generate alpha signals using Alpha158 factors (200+) + ML model.
+
+        Runs the pipeline directly — no LLM round-trip needed. The pipeline is
+        fully deterministic: compute factors → preprocess → train model → predict.
+
+        Falls back to legacy RSI/MACD/Bollinger if indicators are explicitly specified.
         """
-        # Prepare context
-        context = {
-            'data': data,              # Test Data
-            'train_data': train_data,  # Train Data
-            'factors': factors,
-            'indicators': indicators,
-            'model_type': model_type,
-            'signal_threshold': signal_threshold,
-            'data_processor': self.data_processor
-        }
-        
-        print("DEBUG: 🤖 Requesting Alpha Agent LLM...")
-        
-        # We instruct the agent. The prompt optimization can now change this instruction!
-        # Default instruction uses the variables passed in.
-        # But the agent's system prompt (self.agent.instructions) encourages flexibility.
-        
-        request = (
-            f"Generate alpha signals. "
-            f"Call 'run_alpha_pipeline' ONCE to handle everything automatically. "
-            f"Default parameters: indicators={indicators}, model={model_type}."
+        use_alpha158 = (indicators is None)
+        feature_label = "Alpha158" if use_alpha158 else "legacy"
+        print(f"DEBUG: 🤖 Alpha Agent running pipeline directly... (features: {feature_label}, model: {model_type})")
+
+        return _run_alpha_pipeline_impl(
+            test_data=data,
+            train_data=train_data,
+            factors=factors or [],
+            indicators=indicators,
+            model_type=model_type,
+            signal_threshold=signal_threshold,
+            data_processor=self.data_processor,
         )
-        
-        result = self.agent.run(request, context=context, max_turns=10)
-        print(f"DEBUG: LLM finished. Context keys: {list(context.keys())}")
-        
-        if 'result' in context:
-            return context['result']
-        
-        return {'status': 'error', 'message': 'LLM did not produce a result in context'}
 
 if __name__ == "__main__":
     print("Alpha Signal Agent Initialized")

@@ -1589,38 +1589,35 @@ class BacktestAgent(Agent):
             return self._run_simple_fallback_backtest(strategy_id, start_time, end_time, account)
     
     def _run_simple_fallback_backtest(self, strategy_id, start_time, end_time, account):
-        """Simple fallback when Qlib is not available"""
-        print("🔄 Running simple fallback backtest...")
-        
-        # Generate mock results for demonstration
-        dates = pd.date_range(start=start_time, end=end_time, freq='D')
-        returns = np.random.normal(0.0008, 0.02, len(dates))  # Mock daily returns
-        
-        cumulative_return = (1 + pd.Series(returns)).cumprod().iloc[-1] - 1
-        volatility = pd.Series(returns).std() * np.sqrt(252)
-        sharpe = pd.Series(returns).mean() / pd.Series(returns).std() * np.sqrt(252)
-        
+        """
+        Last-resort fallback when Qlib is completely unavailable.
+
+        Instead of returning fake random data, this returns a clear error
+        indicating that backtesting requires either Qlib or real market data.
+        """
+        print("❌ Qlib backtest unavailable — no real backtest results can be produced.")
+        print("   Install qlib with: pip install qlib")
+        print("   Or use run_simple_backtest_paper_interface() with real market data.")
+
         backtest_results = {
             "strategy_id": strategy_id,
             "backtest_period": f"{start_time} to {end_time}",
+            "status": "unavailable",
+            "reason": "Qlib not installed and no market data provided. "
+                      "Install qlib or use run_simple_backtest_paper_interface().",
             "portfolio_metrics": {
-                "total_return": pd.Series(returns).sum(),
-                "cumulative_return": cumulative_return,
-                "volatility": volatility,
-                "sharpe_ratio": sharpe,
-                "max_drawdown": -0.05,  # Mock value
-                "calmar_ratio": 1.2     # Mock value
-            },
-            "detailed_results": {
-                "returns": returns.tolist(),
-                "dates": [d.isoformat() for d in dates]
+                "total_return": None,
+                "cumulative_return": None,
+                "volatility": None,
+                "sharpe_ratio": None,
+                "max_drawdown": None,
             },
             "qlib_native": False,
-            "fallback": True
+            "fallback": True,
         }
-        
+
         self.backtest_context['results'][strategy_id] = backtest_results
-        return {"status": "success", "results": backtest_results}
+        return {"status": "error", "message": "Qlib unavailable — no backtest results.", "results": backtest_results}
     
     def _calculate_max_dd_duration(self, drawdown_series):
         """Calculate maximum drawdown duration"""
@@ -1774,85 +1771,32 @@ class BacktestAgent(Agent):
         return changes
     
     def _generate_mock_long_short_results(self, topk, start_time, end_time):
-        """Generate mock long-short backtest results for demonstration"""
-        print("🎭 Generating mock long-short backtest results...")
-        
-        # Generate sample data
-        dates = pd.date_range(start=start_time, end=end_time, freq='D')
-        n_days = len(dates)
-        
-        # Simulate returns for long, short, and long-short portfolios
-        long_returns = pd.Series(
-            np.random.normal(0.0008, 0.02, n_days),  # Slightly positive mean
-            index=dates,
-            name='long_returns'
-        )
-        
-        short_returns = pd.Series(
-            np.random.normal(-0.0002, 0.015, n_days),  # Slightly negative mean  
-            index=dates,
-            name='short_returns'
-        )
-        
-        long_short_returns = long_returns - short_returns
-        
-        # Calculate cumulative returns
-        long_cum = (1 + long_returns).cumprod()
-        short_cum = (1 + short_returns).cumprod()
-        ls_cum = (1 + long_short_returns).cumprod()
-        
-        # Calculate performance metrics
-        def calc_metrics(returns_series):
-            total_return = returns_series.sum()
-            vol = returns_series.std() * np.sqrt(252)
-            sharpe = (returns_series.mean() * 252) / vol if vol > 0 else 0
-            
-            # Max drawdown
-            cum_returns = (1 + returns_series).cumprod()
-            running_max = cum_returns.expanding().max()
-            drawdown = (cum_returns - running_max) / running_max
-            max_dd = drawdown.min()
-            
-            return {
-                'total_return': total_return,
-                'annualized_return': returns_series.mean() * 252,
-                'volatility': vol,
-                'sharpe_ratio': sharpe,
-                'max_drawdown': max_dd
-            }
-        
-        long_metrics = calc_metrics(long_returns)
-        short_metrics = calc_metrics(short_returns)
-        ls_metrics = calc_metrics(long_short_returns)
-        
+        """
+        Long-short backtest requires real market data for meaningful results.
+        Returns a clear unavailable status instead of generating fake random returns.
+        """
+        print("❌ Long-short backtest unavailable — requires real market data or Qlib.")
+        print("   Use run_simple_backtest_paper_interface() with real market_data instead.")
+
         results = {
-            "status": "success",
-            "backtest_type": "long_short_mock",
+            "status": "unavailable",
+            "backtest_type": "long_short",
+            "reason": "Long-short backtest requires real market data. "
+                      "Use run_simple_backtest_paper_interface() with market_data parameter.",
             "parameters": {
                 "topk": topk,
                 "period": f"{start_time} to {end_time}",
-                "simulation": "mock_data"
-            },
-            "returns": {
-                "long": long_returns.to_dict(),
-                "short": short_returns.to_dict(),
-                "long_short": long_short_returns.to_dict()
-            },
-            "cumulative_returns": {
-                "long": long_cum.to_dict(),
-                "short": short_cum.to_dict(),
-                "long_short": ls_cum.to_dict()
             },
             "performance_metrics": {
-                "long": long_metrics,
-                "short": short_metrics,
-                "long_short": ls_metrics
-            }
+                "long": {"total_return": None, "sharpe_ratio": None, "max_drawdown": None},
+                "short": {"total_return": None, "sharpe_ratio": None, "max_drawdown": None},
+                "long_short": {"total_return": None, "sharpe_ratio": None, "max_drawdown": None},
+            },
         }
-        
-        # Store results
-        backtest_id = f"mock_long_short_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+        backtest_id = f"long_short_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         self.backtest_context['results'][backtest_id] = results
+        return results
         
         print(f"✅ Mock long-short backtest generated")
         print(f"📈 Long-Short Return: {ls_metrics['total_return']:.2%}")
@@ -1866,21 +1810,66 @@ class BacktestAgent(Agent):
         return {"type": "alpha_factor_strategy", "factors": len(factors)}
     
     def _estimate_strategy_metrics(self, factors, params):
-        """Estimate strategy performance metrics"""
-        return {"expected_sharpe": np.random.uniform(0.5, 2.0)}
+        """
+        Estimate strategy performance metrics.
+
+        Cannot produce a meaningful Sharpe estimate without running an actual
+        backtest. Returns sentinel values so callers can detect the data is unavailable
+        rather than silently consuming fake random numbers.
+        """
+        n_factors = len(factors) if factors else 0
+        return {
+            "expected_sharpe": None,
+            "status": "unavailable",
+            "reason": "Sharpe ratio requires actual backtest execution. "
+                      f"Strategy uses {n_factors} factor(s). Run a backtest for real metrics.",
+        }
     
     def _define_risk_controls(self, params):
         """Define risk control parameters"""
         return {"max_position_size": 0.1, "stop_loss": -0.05}
     
     def _run_simple_backtest(self, strategy, data, benchmark):
-        """Run simplified backtest simulation"""
-        returns = np.random.normal(0.001, 0.02, len(data))
-        return {
-            'returns': returns,
-            'positions': np.ones(len(data)) * 0.1,
-            'trades': ['mock_trade'] * 10
-        }
+        """
+        Simplified backtest using real market data when available.
+
+        Computes actual daily returns from the provided data. Falls back to an
+        explicit error state if no usable data is present.
+        """
+        try:
+            # Compute real returns from provided data
+            if isinstance(data, pd.DataFrame) and 'close' in data.columns:
+                if 'symbol' in data.columns:
+                    # Portfolio-level: average return across all symbols per day
+                    daily_rets = data.groupby('date')['close'].mean().pct_change().dropna()
+                else:
+                    daily_rets = data['close'].pct_change().dropna()
+                returns = daily_rets.values
+
+                if len(returns) < 5:
+                    raise ValueError(f"Only {len(returns)} valid return observations")
+
+                # Equal-weight position assumption
+                n_assets = data['symbol'].nunique() if 'symbol' in data.columns else 1
+                positions = np.full(len(returns), 1.0 / max(n_assets, 1))
+                trades = [f"rebalance_{i}" for i in range(min(len(returns) // 20, 10))]
+
+                return {
+                    'returns': returns,
+                    'positions': positions,
+                    'trades': trades,
+                    'computed_from_real_data': True,
+                }
+            else:
+                raise ValueError("Data must be a DataFrame with 'close' column")
+        except Exception as e:
+            return {
+                'returns': np.array([]),
+                'positions': np.array([]),
+                'trades': [],
+                'error': f"Cannot compute backtest: {e}",
+                'computed_from_real_data': False,
+            }
     
     def _calculate_performance_metrics(self, returns, benchmark_returns=None):
         """Enhanced performance metrics using Qlib risk analysis"""
@@ -1918,22 +1907,29 @@ class BacktestAgent(Agent):
                 # Fallback to simplified calculation
                 total_return = np.sum(returns)
                 sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0
+                # Compute real max drawdown from returns
+                cum = (1 + pd.Series(returns)).cumprod()
+                running_max = cum.expanding().max()
+                max_dd = float((cum - running_max) / running_max).min()
                 return {
                     'total_return': total_return,
                     'sharpe_ratio': sharpe_ratio,
-                    'max_drawdown': -0.05,
+                    'max_drawdown': max_dd,
                     'volatility': np.std(returns) * np.sqrt(252)
                 }
-                
+
         except Exception as e:
             print(f"❌ Enhanced metrics calculation failed: {str(e)}")
             # Fallback to simplified calculation
             total_return = np.sum(returns)
             sharpe_ratio = np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0
+            cum = (1 + pd.Series(returns)).cumprod()
+            running_max = cum.expanding().max()
+            max_dd = float((cum - running_max) / running_max).min()
             return {
                 'total_return': total_return,
                 'sharpe_ratio': sharpe_ratio,
-                'max_drawdown': -0.05,
+                'max_drawdown': max_dd,
                 'volatility': np.std(returns) * np.sqrt(252)
             }
     

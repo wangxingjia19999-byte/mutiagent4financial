@@ -565,20 +565,10 @@ class Orchestrator:
                 train_data = None
                 test_data = full_data
 
-            # 2. Alpha Generation
-            # Define some default factors/indicators for the demo
-            factors = [
-                {"factor_name": "momentum_20", "factor_type": "technical", "calculation_method": "expression", "expression": "close / Ref(close, 20) - 1", "lookback_period": 20}
-            ]
-            indicators = ["RSI", "MACD", "Bollinger"]
-            
+            # 2. Alpha Generation — Alpha158 factors + LightGBM by default
             alpha_result = self.alpha_agent.generate_signals_from_data(
-                data=test_data, # Predict on Test
-                factors=factors, 
-                indicators=indicators, 
-                model_type="linear", 
-                signal_threshold=0.0,
-                train_data=train_data # Train on History
+                data=test_data,  # Predict on Test
+                train_data=train_data,  # Train on History
             )
             
             if alpha_result["status"] != "success":
@@ -705,20 +695,11 @@ class Orchestrator:
                     continue
                     
                 logger.info(f"📅 Rolling Step: {current_dt.date()} -> {next_week_dt.date()} (Train: {len(train_data)}, Test: {len(test_data)})")
-                
-                # Generate Signals
-                factors = [
-                    {"factor_name": "momentum_20", "factor_type": "technical", "calculation_method": "expression", "expression": "close / Ref(close, 4) - 1", "lookback_period": 4}
-                ]
-                indicators = ["RSI", "MACD", "Bollinger"]
-                
+
+                # Generate Signals — Alpha158 factors + LightGBM by default
                 alpha_result = self.alpha_agent.generate_signals_from_data(
-                    data=test_data, 
+                    data=test_data,
                     train_data=train_data,
-                    factors=factors,
-                    indicators=indicators,
-                    model_type="linear",
-                    signal_threshold=0.0
                 )
                 
                 if alpha_result['status'] == 'success':
@@ -903,18 +884,9 @@ class Orchestrator:
                 train_data = data.iloc[:-30] if len(data) > 30 else data
                 test_data = data.iloc[-30:] if len(data) > 30 else data
 
-            # 2. Alpha signals
-            factors = [
-                {"factor_name": "momentum_20", "factor_type": "technical",
-                 "calculation_method": "expression", "expression": "close / Ref(close, 20) - 1",
-                 "lookback_period": 20},
-            ]
-            indicators = ["RSI", "MACD", "Bollinger"]
-
+            # 2. Alpha signals — Alpha158 factors + LightGBM by default
             alpha_result = self.alpha_agent.generate_signals_from_data(
                 data=test_data, train_data=train_data,
-                factors=factors, indicators=indicators,
-                model_type="linear", signal_threshold=0.0,
             )
 
             if alpha_result["status"] != "success":
