@@ -265,7 +265,9 @@ def resolve_symbols(args) -> list:
             print(f"  🧠 Running multi-factor pre-screener (5000+ → {screen_top_n} candidates)...")
             try:
                 from data.providers.full_market_screener import FullMarketScreener
-                screener = FullMarketScreener()
+                screener = FullMarketScreener(
+                    max_price=getattr(args, 'max_price', None)
+                )
                 symbols = screener.screen(
                     top_n=screen_top_n,
                     fetch_historical=True,
@@ -856,6 +858,10 @@ def main():
     parser.add_argument(
         "--no-news", action="store_true",
         help="Disable news sentiment analysis.",
+    )
+    parser.add_argument(
+        "--max-price", type=float, default=None,
+        help="Maximum stock price in ¥ (e.g. 50 = only stocks ≤ ¥50). Applied as screener hard filter.",
     )
 
     args = parser.parse_args()

@@ -56,9 +56,12 @@ class FullMarketScreener:
         "low_volatility": 0.20,
     }
 
-    def __init__(self, pro_api=None):
+    def __init__(self, pro_api=None, max_price: float = None):
         self._pro = pro_api
+        self.max_price = max_price  # optional: max stock price (e.g. 50 = ¥50)
         self._init_api()
+        if max_price:
+            logger.info("Price cap: ≤ ¥%.0f", max_price)
 
     def _init_api(self):
         if self._pro is not None:
@@ -205,12 +208,13 @@ class FullMarketScreener:
     # ── Hard filters ─────────────────────────────────────────────
 
     def apply_hard_filters(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply binary pass/fail filters."""
+        """Apply binary pass/fail filters (price, volume, amount)."""
         mask = pd.Series(True, index=df.index)
 
         if "close" in df.columns:
             c = df["close"].astype(float)
-            mask &= (c >= self.MIN_PRICE) & (c <= self.MAX_PRICE)
+            max_p = self.max_price if self.max_price else self.MAX_PRICE
+            mask &= (c >= self.MIN_PRICE) & (c <= max_p)
         if "vol" in df.columns:
             mask &= df["vol"].astype(float) >= self.MIN_VOLUME
         if "amount" in df.columns:
