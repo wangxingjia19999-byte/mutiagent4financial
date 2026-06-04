@@ -185,6 +185,104 @@ def _prepare_alpha158_features(data: pd.DataFrame) -> pd.DataFrame:
     return features
 
 
+def _compute_factor_ic(
+    features: pd.DataFrame,
+    targets: pd.Series,
+    horizons: List[int] = None,
+    top_n: int = 10,
+) -> Dict:
+    """
+    Compute Information Coefficient (IC) for each factor at multiple horizons.
+
+    IC = Spearman rank correlation between factor(t) and forward_return(t+h).
+    IC decay analysis shows how quickly a factor's predictive power fades.
+
+    Returns:
+        {
+            "ic_by_horizon": {horizon: {factor: ic}},  # IC per horizon
+            "top_factors": [(factor, avg_ic)],          # best overall factors
+            "decay_summary": str,                       # human-readable
+            "avg_ic": float,                            # mean IC across all
+        }
+    """
+    if horizons is None:
+        horizons = [1, 3, 5, 10, 20]
+
+    from scipy.stats import spearmanr
+
+    # Align features and targets
+    aligned = pd.concat([features, targets.rename('_target')], axis=1).dropna()
+    if len(aligned) < 30:
+        return {"ic_by_horizon": {}, "top_factors": [], "decay_summary": "Insufficient data", "avg_ic": 0.0}
+
+    X = aligned.drop(columns=['_target'])
+    y_raw = aligned['_target']
+
+    ic_by_horizon = {}
+    factor_avg_ic = {}
+
+    for h in horizons:
+        if len(y_raw) <= h:
+            continue
+        y_fwd = y_raw.shift(-h).dropna()
+        common_idx = X.index.intersection(y_fwd.index)
+        if len(common_idx) < 20:
+            continue
+
+        X_h = X.loc[common_idx]
+        y_h = y_fwd.loc[common_idx]
+
+        horizon_ic = {}
+        for col in X_h.columns:
+            try:
+                ic, _ = spearmanr(X_h[col].rank(), y_h.rank())
+                if not np.isnan(ic):
+                    horizon_ic[col] = round(float(ic), 6)
+            except Exception:
+                pass
+        ic_by_horizon[h] = horizon_ic
+
+        # Accumulate for average
+        for col, ic in horizon_ic.items():
+            if col not in factor_avg_ic:
+                factor_avg_ic[col] = []
+            factor_avg_ic[col].append(ic)
+
+    # Average IC across horizons
+    avg_ic = {f: round(float(np.mean(ics)), 6) for f, ics in factor_avg_ic.items() if ics}
+    ranked = sorted(avg_ic.items(), key=lambda x: abs(x[1]), reverse=True)
+
+    # Decay summary
+    top_factors = ranked[:top_n]
+    bottom_factors = ranked[-top_n:] if len(ranked) > top_n else []
+
+    # Compute decay rate for top factors
+    decay_lines = []
+    for f, _ in top_factors[:5]:
+        ics = [ic_by_horizon[h].get(f, 0) for h in sorted(ic_by_horizon.keys())]
+        if len(ics) >= 2 and abs(ics[0]) > 0.01:
+            # Simple decay: IC_h1 vs IC_h20
+            decay_pct = (abs(ics[-1]) / (abs(ics[0]) + 1e-8))
+            label = "slow decay" if decay_pct > 0.5 else "fast decay"
+            decay_lines.append(f"{f}: h1→h20 {abs(ics[0]):.3f}→{abs(ics[-1]):.3f} ({label})")
+
+    summary = (
+        f"Mean |IC|={np.mean([abs(v) for v in avg_ic.values()]):.4f}, "
+        f"top={top_factors[0][0] if top_factors else 'N/A'}({top_factors[0][1]:.4f}), "
+        f"bottom={bottom_factors[-1][0] if bottom_factors else 'N/A'}({bottom_factors[-1][1]:.4f})"
+    )
+    if decay_lines:
+        summary += ". " + "; ".join(decay_lines[:3])
+
+    return {
+        "ic_by_horizon": ic_by_horizon,
+        "top_factors": top_factors,
+        "bottom_factors": bottom_factors,
+        "decay_summary": summary,
+        "avg_ic": round(float(np.mean([abs(v) for v in avg_ic.values()])), 6) if avg_ic else 0.0,
+    }
+
+
 def _preprocess_features(features: pd.DataFrame) -> pd.DataFrame:
     """
     Winsorize (clip at 1%/99%) + standardize (z-score) for stable model training.
@@ -410,16 +508,45 @@ def _run_alpha_pipeline_impl(
         except Exception as e:
             return {"status": "error", "message": f"Feature Prep Failed: {str(e)}"}
 
-        # 1b. Feature selection — pick top-N factors by LightGBM importance
-        #      Reduces 203 factors → ~60 most predictive, filtering out noise.
-        if use_alpha158 and len(X_train.columns) > 80:
+        # 1b. IC decay analysis — measure factor predictive power
+        ic_report = None
+        if use_alpha158 and y_train is not None and len(y_train) > 50:
             try:
-                X_train, X_test, selected_count = _select_top_features(
-                    X_train, y_train, X_test, top_k=60
-                )
-                print(f"DEBUG: Feature selection: {X_train.shape[1]} factors retained (from {X_train.shape[1] + len(set())} original)")
+                ic_report = _compute_factor_ic(X_train, y_train, top_n=8)
+                print(f"  IC decay: {ic_report['decay_summary']}")
+                if ic_report['top_factors']:
+                    top3 = [f"{f}({v:.4f})" for f, v in ic_report['top_factors'][:3]]
+                    print(f"  Top IC factors: {', '.join(top3)}")
             except Exception as e:
-                print(f"WARNING: Feature selection failed ({e}), using all {X_train.shape[1]} factors.")
+                print(f"  IC analysis skipped: {e}")
+
+        # 1c. Feature selection — IC pre-filter + LightGBM importance
+        #      IC drops noise factors (< 0.005), LGBM selects top 60 from remainder
+        if use_alpha158 and len(X_train.columns) > 80:
+            # Pre-filter: drop factors with near-zero IC (pure noise)
+            if ic_report and ic_report.get('avg_ic', 0) > 0:
+                factor_avg_ic = {}
+                for h_ics in ic_report.get('ic_by_horizon', {}).values():
+                    for f, ic in h_ics.items():
+                        if f not in factor_avg_ic:
+                            factor_avg_ic[f] = []
+                        factor_avg_ic[f].append(ic)
+                mean_ic = {f: np.mean(ics) for f, ics in factor_avg_ic.items()}
+                # Keep factors with |IC| > 0.005
+                keep = [f for f, ic in mean_ic.items() if abs(ic) > 0.005]
+                if len(keep) > 20:
+                    X_train = X_train[keep]
+                    X_test = X_test[keep]
+                    print(f"  IC pre-filter: {X_train.shape[1]} factors with |IC| > 0.005")
+
+            if len(X_train.columns) > 80:
+                try:
+                    X_train, X_test, selected_count = _select_top_features(
+                        X_train, y_train, X_test, top_k=60
+                    )
+                    print(f"DEBUG: Feature selection: {X_train.shape[1]} factors retained")
+                except Exception as e:
+                    print(f"WARNING: Feature selection failed ({e}), using all {X_train.shape[1]} factors.")
 
         # 2. Train & Predict
         model_res = _train_model_and_predict(X_train, y_train, X_test, model_type)
