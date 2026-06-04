@@ -27,28 +27,23 @@ CN_MAX_PRICE = 3_000.0      # skip ultra-expensive stocks
 CN_MIN_AMOUNT = 1_000_000    # minimum daily amount (¥1M)
 
 
-def _patch_akshare_network():
-    """Ensure akshare uses direct connection (no proxy). Called once on import."""
-    try:
-        import requests
-        import akshare
-        # Override akshare's internal request function to use direct connection
-        if hasattr(akshare, '_requests_get'):
-            return  # already patched
+def _get_akshare_session():
+    """Return a persistent requests.Session for akshare calls (no proxy, pooled)."""
+    import requests
+    s = requests.Session()
+    s.trust_env = False  # bypass system proxy for eastmoney API
+    return s
 
-        akshare._requests_get = requests.get
-        def _direct_get(url, **kwargs):
-            kwargs.setdefault('timeout', 15)
-            s = requests.Session()
-            s.trust_env = False  # bypass system proxy
-            return s.get(url, **kwargs)
-        requests.get = _direct_get
-        akshare._requests_get = _direct_get
-    except Exception:
-        pass  # best-effort
+# Module-level session — reused across all akshare calls, no global monkey-patch
+_ak_session = None
 
-
-_patch_akshare_network()
+def _ak_request(url: str, **kwargs) -> 'requests.Response':
+    """Make an HTTP request via the shared akshare session."""
+    global _ak_session
+    if _ak_session is None:
+        _ak_session = _get_akshare_session()
+    kwargs.setdefault('timeout', 15)
+    return _ak_session.get(url, **kwargs)
 
 
 def _normalize_symbol(symbol: str) -> str:

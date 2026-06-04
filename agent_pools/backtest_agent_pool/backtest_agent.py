@@ -2376,18 +2376,24 @@ class BacktestAgent(Agent):
             
             last_rebalance_idx = -999
             
-            # Debug predictions index
+            # Debug predictions index — normalize MultiIndex column names
             preds_lookup = {}
             if hasattr(predictions, 'index'):
                 if isinstance(predictions.index, pd.MultiIndex):
                     preds_df = predictions.reset_index()
-                    if preds_df.shape[1] == 3:
-                         preds_df.columns = ['date', 'symbol', 'score']
-                    else:
-                         preds_df.columns = ['date', 'symbol', 'score'] 
+                    # Normalize level names: 'datetime'/'instrument' → 'date'/'symbol'
+                    name_map = {'datetime': 'date', 'instrument': 'symbol',
+                                'date': 'date', 'symbol': 'symbol'}
+                    new_cols = []
+                    for c in preds_df.columns:
+                        new_cols.append(name_map.get(str(c), str(c)))
+                    # Ensure last column is 'score'
+                    if new_cols[-1] not in ('date', 'symbol'):
+                        new_cols[-1] = 'score'
+                    preds_df.columns = new_cols
                 else:
                     preds_df = predictions.reset_index()
-                    
+
                 preds_df['date'] = pd.to_datetime(preds_df['date'])
                 preds_df = preds_df.drop_duplicates(subset=['date', 'symbol'])
                 preds_lookup = preds_df.pivot(index='date', columns='symbol', values='score').to_dict(orient='index')

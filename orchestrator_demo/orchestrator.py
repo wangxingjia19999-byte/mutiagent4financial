@@ -408,9 +408,12 @@ class Orchestrator:
                         continue
                         
                     # Handle MultiIndex columns (yfinance > 0.2)
-                    if isinstance(df.columns, pd.MultiIndex):
-                        if df.columns.nlevels > 1:
-                            df.columns = df.columns.droplevel(1)
+                    if isinstance(df.columns, pd.MultiIndex) and df.columns.nlevels > 1:
+                        # Single symbol: 'Close'/'AAPL' → 'Close'. Safe to droplevel.
+                        df.columns = df.columns.droplevel(1)
+                        # Safety: if droplevel created duplicates, use first level instead
+                        if df.columns.duplicated().any():
+                            df.columns = [str(c[0]).lower() for c in df.columns]
                             
                     df = df.reset_index()
                     # Standardize columns

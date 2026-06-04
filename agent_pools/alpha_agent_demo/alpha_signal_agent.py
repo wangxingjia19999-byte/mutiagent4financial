@@ -476,7 +476,8 @@ def _run_alpha_pipeline_impl(
                 from agent_pools.portfolio_agent_demo.portfolio_agent import apply_sector_neutrality
                 neutralized = {}
                 for dt, grp in signals.groupby(level=0):
-                    day_signals = {s: grp.xs(dt, level=0).get(s, 0) for s in grp.index.get_level_values(1)}
+                    # Convert to {symbol: signal} dict — use droplevel to avoid .get(s, 0) false zeros
+                    day_signals = grp.droplevel(0).to_dict()
                     day_neut = apply_sector_neutrality(day_signals)
                     for sym, val in day_neut.items():
                         neutralized[(dt, sym)] = val

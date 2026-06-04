@@ -354,31 +354,42 @@ class TushareProvider(DataProvider):
     def _filter_liquid_cn(self, symbols: List[str]) -> List[str]:
         """Filter A-shares by basic price/volume/market-cap thresholds.
 
-        Uses Tushare daily_basic() for latest fundamental data on a sample of stocks.
-        Falls back to keeping top 2000 by market cap when the API is limited.
+        Queries Tushare daily_basic() one-by-one (free tier doesn't support batch).
+        Falls back to top 2000 when the API is unavailable.
         """
         if len(symbols) <= 2000:
             return symbols
 
-        try:
-            # Try to get daily basic data for filtering
-            sample = symbols[:2000]  # API rate limit consideration
-            ts_codes = ",".join(sample[:500])
-            df = self._pro.daily_basic(
-                ts_code=ts_codes,
-                trade_date=datetime.now().strftime("%Y%m%d"),
-                fields="ts_code,close,vol,total_mv",
-            )
-            if df is not None and not df.empty:
-                passed = []
-                for _, row in df.iterrows():
-                    price = float(row.get("close", 0))
-                    volume = float(row.get("vol", 0))
-                    if CN_MIN_PRICE <= price <= CN_MAX_PRICE and volume >= CN_MIN_VOLUME:
-                        passed.append(_ts_code_to_symbol(row["ts_code"]))
-                return passed
-        except Exception as e:
-            logger.warning("daily_basic filter failed: %s", e)
+        # Process all symbols up to 2000 via one-by-one queries
+        sample = symbols[:2000]
+        passed = []
+        failed_count = 0
 
-        # Fallback: top 2000
-        return symbols[:2000]
+        for sym in sample:
+            try:
+                df = self._pro.daily_basic(
+                    ts_code=sym,
+                    trade_date=datetime.now().strftime("%Y%m%d"),
+                    fields="ts_code,close,vol,total_mv",
+                )
+                if df is not None and not df.empty:
+                    price = float(df["close"].iloc[0])
+                    volume = float(df["vol"].iloc[0])
+                    if CN_MIN_PRICE <= price <= CN_MAX_PRICE and volume >= CN_MIN_VOLUME:
+                        passed.append(_ts_code_to_symbol(df["ts_code"].iloc[0]))
+                else:
+                    failed_count += 1
+            except Exception:
+                failed_count += 1
+
+            # Rate limit: 0.08s per query
+            time.sleep(0.08)
+
+        if failed_count > len(sample) * 0.5:
+            # More than 50% failed — API likely unavailable, use fallback
+            logger.warning("daily_basic filter: %d/%d failed, using fallback", failed_count, len(sample))
+            return symbols[:2000]
+
+        logger.info("Liquid filter: %d passed from %d checked (kept all %d)",
+                     len(passed), len(sample), len(symbols))
+        return passed if passed else symbols[:2000]
