@@ -96,6 +96,95 @@ class NewsSentimentAgent:
 
     # ── Main API ───────────────────────────────────────────────────
 
+    def analyze_sectors(self) -> Dict:
+        """
+        Analyze CCTV news to get sector-level trends. No per-stock fetching needed.
+
+        Uses CCTV news (always available, no eastmoney required) and classifies
+        each article into the 9 sector groups via keyword matching.
+
+        Returns:
+            {
+                "sector_impact": {sector: float},   # sentiment per sector
+                "sector_articles": {sector: int},   # article count per sector
+                "sector_headlines": {sector: [str]},# sample headlines
+                "narrative": str,                   # sector trend summary
+                "top_sectors": [(sector, score)],   # ranked best
+                "worst_sectors": [(sector, score)], # ranked worst
+            }
+        """
+        if not self.is_available:
+            return {
+                "sector_impact": {}, "sector_articles": {},
+                "sector_headlines": {}, "narrative": "CCTV新闻不可用。",
+                "top_sectors": [], "worst_sectors": [],
+            }
+
+        # 1. Fetch CCTV news headlines
+        headlines = self._fetch_cctv_news()
+        if not headlines:
+            return {
+                "sector_impact": {}, "sector_articles": {},
+                "sector_headlines": {}, "narrative": "未获取到CCTV新闻。",
+                "top_sectors": [], "worst_sectors": [],
+            }
+
+        print(f"  📰 CCTV: {len(headlines)} articles, classifying into 9 sectors...")
+
+        # 2. Classify each article into sector(s) + score sentiment
+        sector_headlines: Dict[str, List[str]] = {s: [] for s in SECTOR_KEYWORDS}
+        sector_scores: Dict[str, List[float]] = {s: [] for s in SECTOR_KEYWORDS}
+
+        for headline in headlines:
+            text = str(headline)
+            matched_sectors = []
+            for sector, keywords in SECTOR_KEYWORDS.items():
+                if any(kw in text for kw in keywords):
+                    matched_sectors.append(sector)
+
+            if matched_sectors:
+                score = self._compute_sentiment([text])
+                for sec in matched_sectors:
+                    sector_headlines[sec].append(text[:120])
+                    sector_scores[sec].append(score)
+
+        # 3. Aggregate per sector
+        sector_impact = {}
+        sector_articles = {}
+        for sector in SECTOR_KEYWORDS:
+            scores = sector_scores[sector]
+            sector_articles[sector] = len(scores)
+            if scores:
+                sector_impact[sector] = round(float(np.mean(scores)), 4)
+            else:
+                sector_impact[sector] = 0.0
+
+        # 4. Rank sectors
+        ranked = sorted(sector_impact.items(), key=lambda x: x[1], reverse=True)
+        top_sectors = [(s, v) for s, v in ranked if v > 0][:3]
+        worst_sectors = [(s, v) for s, v in ranked if v < 0][:3]
+
+        # 5. Narrative
+        narrative = self._build_sector_narrative(
+            sector_impact, sector_articles, top_sectors, worst_sectors, len(headlines)
+        )
+
+        # Print sector summary
+        print(f"  📊 Sector trends:")
+        for sector, score in ranked:
+            if sector_articles[sector] > 0:
+                bar = "🟢" if score > 0.1 else ("🔴" if score < -0.1 else "⚪")
+                print(f"    {bar} {sector:<8}: {score:+.3f} ({sector_articles[sector]} articles)")
+
+        return {
+            "sector_impact": sector_impact,
+            "sector_articles": sector_articles,
+            "sector_headlines": {s: h[:2] for s, h in sector_headlines.items() if h},
+            "narrative": narrative,
+            "top_sectors": top_sectors,
+            "worst_sectors": worst_sectors,
+        }
+
     def analyze(
         self,
         symbols: List[str],
@@ -103,63 +192,99 @@ class NewsSentimentAgent:
         max_news_per_stock: int = 5,
     ) -> Dict:
         """
-        Analyze recent news for a list of stock symbols.
+        Analyze recent news for a list of stock symbols + sector trends.
 
         Returns:
             {
-                "sentiment": {symbol: float},     # -1 to +1 per stock
-                "sector_impact": {sector: float}, # sector-level sentiment
-                "headlines": {symbol: [str]},     # top headlines
-                "narrative": str,                 # human-readable summary
+                "sentiment": {symbol: float},
+                "sector_impact": {sector: float},
+                "sector_articles": {sector: int},
+                "headlines": {symbol: [str]},
+                "narrative": str,
                 "stocks_analyzed": int,
             }
         """
         if not self.is_available or len(symbols) == 0:
             return self._neutral_result(symbols)
 
-        symbols = symbols[:self.max_stocks]
+        # ── Primary: CCTV sector analysis (always works, no eastmoney) ──
+        sector_result = self.analyze_sectors()
+        sector_impact = sector_result["sector_impact"]
+        sector_narrative = sector_result["narrative"]
 
-        # 1. Fetch news headlines per stock
+        # ── Secondary: per-stock news (needs eastmoney) ──
+        symbols = symbols[:self.max_stocks]
         stock_news = {}
         all_headlines = []
 
-        print(f"  📰 Fetching news for {len(symbols)} stocks...")
+        print(f"  📰 Fetching per-stock news for {len(symbols)} stocks...")
         for i, sym in enumerate(symbols):
             headlines = self._fetch_stock_news(sym, lookback_days)
             if headlines:
                 stock_news[sym] = headlines[:max_news_per_stock]
                 all_headlines.extend(headlines[:max_news_per_stock])
             if (i + 1) % 20 == 0:
-                print(f"    ... {i + 1}/{len(symbols)} stocks checked")
+                print(f"    ... {i + 1}/{len(symbols)}")
             time.sleep(0.05)
 
-        # 2. Compute per-stock sentiment
+        # Per-stock sentiment
         sentiment = {}
         for sym in symbols:
             headlines = stock_news.get(sym, [])
             sentiment[sym] = self._compute_sentiment(headlines)
 
-        # 3. Sector-level impact
-        sector_impact = self._compute_sector_impact(all_headlines)
+        # Merge sector + stock narrative
+        narrative = sector_narrative
+        if stock_news:
+            stock_narr = self._build_narrative(sentiment, sector_impact, stock_news)
+            narrative = sector_narrative + " " + stock_narr
 
-        # 4. Narrative summary
-        narrative = self._build_narrative(sentiment, sector_impact, stock_news)
+        top_headlines = {sym: news[:3] for sym, news in stock_news.items() if news}
 
-        # 5. Top headlines for reference
-        top_headlines = {
-            sym: news[:3] for sym, news in stock_news.items() if news
-        }
-
-        print(f"  📰 News analysis complete: {len(stock_news)} stocks with news, "
-              f"avg sentiment {np.mean(list(sentiment.values())):.3f}")
+        stocks_with_news = len([s for s, v in stock_news.items() if v])
+        print(f"  📰 Analysis done: {stocks_with_news} stocks with news, "
+              f"{sum(sector_result['sector_articles'].values())} sector articles")
 
         return {
             "sentiment": sentiment,
             "sector_impact": sector_impact,
+            "sector_articles": sector_result["sector_articles"],
             "headlines": top_headlines,
             "narrative": narrative,
             "stocks_analyzed": len(symbols),
         }
+
+    # ── CCTV News Fetching ───────────────────────────────────────
+
+    def _fetch_cctv_news(self) -> List[str]:
+        """Fetch recent CCTV news headlines (market-wide context, always available)."""
+        headlines = []
+        try:
+            df = self._ak.news_cctv()
+            if df is not None and not df.empty:
+                # Use BOTH title (short) + content (detailed) for better keyword matching
+                for col in ['title', '标题']:
+                    if col in df.columns:
+                        headlines.extend(df[col].dropna().astype(str).tolist())
+                        break
+                if 'content' in df.columns:
+                    # Content is long text — take first 200 chars of each
+                    headlines.extend(
+                        df['content'].dropna().astype(str).apply(lambda x: x[:200]).tolist()
+                    )
+        except Exception as e:
+            logger.debug("CCTV news fetch failed: %s", e)
+
+        # Deduplicate and trim
+        seen = set()
+        unique = []
+        for h in headlines:
+            h_clean = h.strip()
+            if h_clean and h_clean not in seen and len(h_clean) > 5:
+                seen.add(h_clean)
+                unique.append(h_clean)
+
+        return unique[:100]  # Keep top 100 most recent
 
     # ── News Fetching ─────────────────────────────────────────────
 
@@ -258,6 +383,38 @@ class NewsSentimentAgent:
             for sector, scores in sector_scores.items()
             if scores
         }
+
+    def _build_sector_narrative(
+        self,
+        sector_impact: Dict[str, float],
+        sector_articles: Dict[str, int],
+        top_sectors: List[Tuple[str, float]],
+        worst_sectors: List[Tuple[str, float]],
+        total_articles: int,
+    ) -> str:
+        """Build a sector-trend narrative from CCTV news analysis."""
+        parts = []
+
+        # Overall: how many sectors have news
+        active = sum(1 for c in sector_articles.values() if c > 0)
+        parts.append(f"CCTV新闻覆盖{active}/9个板块（共{total_articles}篇）")
+
+        # Best sectors
+        if top_sectors:
+            best_str = "、".join(f"{s}({v:+.2f})" for s, v in top_sectors)
+            parts.append(f"利好板块: {best_str}")
+
+        # Worst sectors
+        if worst_sectors:
+            worst_str = "、".join(f"{s}({v:+.2f})" for s, v in worst_sectors)
+            parts.append(f"利空板块: {worst_str}")
+
+        # Sectors with no news
+        silent = [s for s, c in sector_articles.items() if c == 0]
+        if silent and len(silent) < 8:
+            parts.append(f"无相关新闻: {'、'.join(silent)}")
+
+        return "。".join(parts) + "。"
 
     def _build_narrative(
         self,

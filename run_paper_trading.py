@@ -576,6 +576,17 @@ def print_backtest_result(result):
     if news_narrative:
         print(f"  📰 {news_narrative}")
 
+    sector_impact = result.get("news_sector_impact", {})
+    if sector_impact:
+        ranked = sorted(sector_impact.items(), key=lambda x: x[1], reverse=True)
+        active = [(s, v) for s, v in ranked if v != 0]
+        if active:
+            bars = []
+            for s, v in active[:6]:
+                icon = "🟢" if v > 0.1 else ("🔴" if v < -0.1 else "⚪")
+                bars.append(f"{icon}{s}{v:+.2f}")
+            print(f"  📊 板块趋势: {'  '.join(bars)}")
+
     ec = result.get("exit_candidates", [])
     if ec:
         print(f"  Exit Candidates: {len(ec)} symbols")
