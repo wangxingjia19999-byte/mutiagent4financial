@@ -653,61 +653,95 @@ class Orchestrator:
         """
         symbols = [symbol] if isinstance(symbol, str) else symbol
         logger.info(f"🚀 Starting World Model Inference (Rolling Week) for {symbols} ({start_date} to {end_date})")
-        
+
         try:
             start_dt = datetime.strptime(start_date, "%Y-%m-%d")
             end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-            
-            # 1. Fetch All Data (The "World" has data, but Agent sees it incrementally)
+
+            # 1. Fetch All Data
             fetch_start = start_dt - timedelta(days=lookback_days)
             full_data = self.fetch_data(symbols, fetch_start, end_dt)
-            
+
             if full_data.empty or 'date' not in full_data.columns:
                 return {"status": "error", "message": "Data fetch failed"}
-                
+
             full_data['date'] = pd.to_datetime(full_data['date']).dt.tz_localize(None)
-            
-            # 2. Weekly Loop
+
+            # 1b. Pre-compute Alpha158 features ONCE for the entire dataset.
+            #     Rolling-window factors only look BACKWARD, so no leakage.
+            #     This avoids 52x redundant recomputation in the weekly loop.
+            logger.info("Pre-computing Alpha158 features on full dataset (%d rows)...", len(full_data))
+            from agent_pools.alpha_agent_demo.alpha158_calculator import Alpha158Calculator
+            from agent_pools.alpha_agent_demo.alpha_signal_agent import _preprocess_features
+
+            calc = Alpha158Calculator()
+            all_features = calc.compute(full_data)
+            all_features = _preprocess_features(all_features)
+            all_features['_date'] = full_data['date'].values
+            all_features['_symbol'] = full_data['symbol'].values if 'symbol' in full_data.columns else '_all'
+            logger.info("Features computed: %d factors x %d rows", all_features.shape[1] - 2, len(all_features))
+
+            # 2. Weekly Loop — slice pre-computed features, don't recompute
             current_dt = start_dt
             all_signals_list = []
-            
+
             while current_dt < end_dt:
                 next_week_dt = current_dt + timedelta(weeks=1)
-                if next_week_dt > end_dt: next_week_dt = end_dt
-                
-                # Define Data Slices
-                # Train: [current_dt - lookback, current_dt)
-                # Test: [current_dt, next_week_dt)
-                
+                if next_week_dt > end_dt:
+                    next_week_dt = end_dt
+
                 train_start = current_dt - timedelta(days=lookback_days)
-                train_data = full_data[
-                    (full_data['date'] >= train_start) & 
-                    (full_data['date'] < current_dt)
-                ].copy()
-                
-                test_data = full_data[
-                    (full_data['date'] >= current_dt) & 
-                    (full_data['date'] < next_week_dt)
-                ].copy()
-                
-                if test_data.empty:
+
+                # Slice pre-computed features by date
+                train_mask = (all_features['_date'] >= train_start) & (all_features['_date'] < current_dt)
+                test_mask = (all_features['_date'] >= current_dt) & (all_features['_date'] < next_week_dt)
+
+                if test_mask.sum() == 0:
                     current_dt = next_week_dt
                     continue
-                    
-                logger.info(f"📅 Rolling Step: {current_dt.date()} -> {next_week_dt.date()} (Train: {len(train_data)}, Test: {len(test_data)})")
 
-                # Generate Signals — Alpha158 factors + LightGBM by default
-                alpha_result = self.alpha_agent.generate_signals_from_data(
-                    data=test_data,
-                    train_data=train_data,
-                )
-                
-                if alpha_result['status'] == 'success':
-                    sigs = alpha_result.get('signals', {})
-                    if sigs:
-                        sig_series = pd.Series(sigs)
+                logger.info(f"📅 Rolling Step: {current_dt.date()} -> {next_week_dt.date()} "
+                           f"(Train: {train_mask.sum()}, Test: {test_mask.sum()})")
+
+                # Compute target (forward return) per-window to avoid leakage
+                train_data_slice = full_data[train_mask].copy()
+                test_data_slice = full_data[test_mask].copy()
+
+                if 'symbol' in train_data_slice.columns:
+                    y_train = train_data_slice.groupby('symbol')['close'].pct_change().shift(-1)
+                else:
+                    y_train = train_data_slice['close'].pct_change().shift(-1)
+
+                # Drop metadata columns for model input
+                feature_cols = [c for c in all_features.columns if c not in ('_date', '_symbol')]
+                X_train = all_features.loc[train_mask, feature_cols].copy()
+                X_test = all_features.loc[test_mask, feature_cols].copy()
+
+                # Align and train
+                try:
+                    from agent_pools.alpha_agent_demo.alpha_signal_agent import _train_model_and_predict
+                    model_res = _train_model_and_predict(X_train, y_train, X_test, 'lightgbm')
+
+                    if model_res['status'] == 'success':
+                        preds = pd.Series(model_res['predictions'], index=test_data_slice.index)
+                        # Cross-sectional rank within this week
+                        dates = test_data_slice['date'].values if 'date' in test_data_slice.columns else None
+                        pred_df = pd.DataFrame({'pred': preds})
+                        if dates is not None:
+                            pred_df['_d'] = dates
+                            pred_df['signal'] = pred_df.groupby('_d')['pred'].rank(pct=True) - 0.5
+                        else:
+                            pred_df['signal'] = pred_df['pred'].rank(pct=True) - 0.5
+
+                        # Build MultiIndex output
+                        sig_series = pred_df['signal']
+                        if 'date' in test_data_slice.columns and 'symbol' in test_data_slice.columns:
+                            sig_series.index = pd.MultiIndex.from_frame(
+                                test_data_slice[['date', 'symbol']].reset_index(drop=True))
                         all_signals_list.append(sig_series)
-                
+                except Exception as e:
+                    logger.warning(f"Rolling step model failed: {e}")
+
                 # Step Forward
                 current_dt = next_week_dt
                 

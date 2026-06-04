@@ -210,6 +210,58 @@ def _preprocess_features(features: pd.DataFrame) -> pd.DataFrame:
 
     return df.astype(np.float32)
 
+
+def _select_top_features(
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    X_test: pd.DataFrame,
+    top_k: int = 60,
+) -> tuple:
+    """
+    Select top-k most important features using a quick LightGBM fit.
+
+    Returns (X_train_selected, X_test_selected, selected_count).
+    Falls back to returning all features if LightGBM is unavailable.
+    """
+    if len(X_train.columns) <= top_k:
+        return X_train, X_test, len(X_train.columns)
+
+    try:
+        import lightgbm as lgb
+
+        # Align and drop NaN
+        aligned = pd.concat([X_train, y_train.rename('_target')], axis=1).dropna()
+        if len(aligned) < 50:
+            return X_train, X_test, len(X_train.columns)
+
+        X = aligned.drop(columns=['_target'])
+        y = aligned['_target']
+
+        # Quick model for importance scoring
+        model = lgb.LGBMRegressor(
+            n_estimators=80, max_depth=5, num_leaves=31,
+            learning_rate=0.1, subsample=0.8, colsample_bytree=0.8,
+            random_state=42, verbose=-1, n_jobs=-1,
+        )
+        model.fit(X, y)
+
+        # Get feature importances (gain-based)
+        importances = pd.Series(model.feature_importances_, index=X.columns)
+        importances = importances.sort_values(ascending=False)
+
+        # Select top-k and log the top 5
+        selected_cols = importances.head(top_k).index.tolist()
+        top5 = importances.head(5)
+        print(f"  Top features: {', '.join(f'{n}({v:.4f})' for n, v in top5.items())}")
+
+        return X_train[selected_cols], X_test[selected_cols], len(selected_cols)
+
+    except ImportError:
+        return X_train, X_test, len(X_train.columns)
+    except Exception as e:
+        raise e
+
+
 def _train_model_and_predict(
     X_train: pd.DataFrame, 
     y_train: pd.Series, 
@@ -302,45 +354,71 @@ def _run_alpha_pipeline_impl(
             )
         except Exception as e:
             return {"status": "error", "message": f"Feature Prep Failed: {str(e)}"}
-            
+
+        # 1b. Feature selection — pick top-N factors by LightGBM importance
+        #      Reduces 203 factors → ~60 most predictive, filtering out noise.
+        if use_alpha158 and len(X_train.columns) > 80:
+            try:
+                X_train, X_test, selected_count = _select_top_features(
+                    X_train, y_train, X_test, top_k=60
+                )
+                print(f"DEBUG: Feature selection: {X_train.shape[1]} factors retained (from {X_train.shape[1] + len(set())} original)")
+            except Exception as e:
+                print(f"WARNING: Feature selection failed ({e}), using all {X_train.shape[1]} factors.")
+
         # 2. Train & Predict
         model_res = _train_model_and_predict(X_train, y_train, X_test, model_type)
         if model_res['status'] != 'success':
             return model_res
-            
-        # 3. Signals
+
+        # 3. Signals — cross-sectional ranking (continuous, no discretization)
+        #    Standard quant approach: rank predictions within each date to remove
+        #    market beta and focus on relative outperformance. Signal strength
+        #    is the rank percentile (0=worst, 1=best), centered to [-0.5, 0.5].
         preds = pd.Series(model_res['predictions'])
-        signals = preds.apply(lambda x: 1.0 if x > signal_threshold else (-1.0 if x < -signal_threshold else 0.0))
-        
-        # Restore index to (date, symbol) for output
-        # Need to normalize test_data first to match 'date', 'symbol' expectations
-        # We can reuse the logic from _prepare_features_targets roughly
+
+        # Restore index to (date, symbol) for cross-sectional ranking
         data_norm = test_data.copy()
-        if isinstance(data_norm.index, pd.MultiIndex): data_norm = data_norm.reset_index()
+        if isinstance(data_norm.index, pd.MultiIndex):
+            data_norm = data_norm.reset_index()
         col_map = {c: c.lower() for c in data_norm.columns}
         data_norm = data_norm.rename(columns=col_map)
-        if 'instrument' in data_norm.columns: data_norm = data_norm.rename(columns={'instrument': 'symbol'})
-        if 'datetime' in data_norm.columns: data_norm = data_norm.rename(columns={'datetime': 'date'})
-        
-        # Ensure index matches preds
-        # preds index matches X_test index, which matches test_data (reset_index(drop=True))
-        # So we need to map back using integer position?
-        # Yes, X_test index is RangeIndex from reset_index(drop=True) inside helper.
-        # We applied same reset to data_norm (but need drop=True)
+        if 'instrument' in data_norm.columns:
+            data_norm = data_norm.rename(columns={'instrument': 'symbol'})
+        if 'datetime' in data_norm.columns:
+            data_norm = data_norm.rename(columns={'datetime': 'date'})
         data_norm = data_norm.reset_index(drop=True)
-        
-        # Align
+
+        # Build a DataFrame with predictions + date for cross-sectional ranking
+        preds.index = data_norm.index
+        pred_df = pd.DataFrame({'prediction': preds})
+        if 'date' in data_norm.columns:
+            pred_df['date'] = data_norm['date'].values
+
+        # Cross-sectional rank within each date (0=worst → 1=best)
+        if 'date' in pred_df.columns and len(pred_df['date'].unique()) > 1:
+            pred_df['signal'] = pred_df.groupby('date')['prediction'].rank(pct=True)
+        else:
+            # Single date or no date column — rank globally
+            pred_df['signal'] = pred_df['prediction'].rank(pct=True)
+
+        # Center around 0 for natural long/short split: [-0.5, 0.5]
+        pred_df['signal'] = pred_df['signal'] - 0.5
+
+        # Build MultiIndex output
+        signals = pred_df['signal']
         signals.index = data_norm.index
-        
         if 'date' in data_norm.columns and 'symbol' in data_norm.columns:
             signals.index = pd.MultiIndex.from_frame(data_norm[['date', 'symbol']])
         elif 'date' in data_norm.columns:
             signals.index = pd.Index(data_norm['date'])
-            
+
         return {
             "status": "success",
             "signals": signals.to_dict(),
-            "model_performance": model_res.get('model_info')
+            "model_performance": model_res.get('model_info'),
+            "signal_type": "cross_sectional_rank",
+            "signal_range": [-0.5, 0.5],
         }
         
     except Exception as e:

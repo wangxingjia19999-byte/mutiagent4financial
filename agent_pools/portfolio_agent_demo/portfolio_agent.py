@@ -93,6 +93,12 @@ def _construct_portfolio_impl(
 
             if selected:
                 # ── Risk-adjusted weighting ──
+                # Precompute alpha score range for normalization (avoid O(n²) in loop)
+                all_scores = [s for _, s in selected]
+                score_min = min(all_scores)
+                score_max = max(all_scores)
+                score_range = (score_max - score_min) + 1e-8
+
                 risk_factors: Dict[str, float] = {}
 
                 for symbol, alpha_score in selected:
@@ -104,9 +110,7 @@ def _construct_portfolio_impl(
                         # risk_score 0.0 → factor 1.0, risk_score 0.5 → factor ~0.55, risk_score 1.0 → factor ~0.33
                         risk_factor = 1.0 / (1.0 + 2.0 * stock_risk_score)
                         # Blend with alpha signal strength
-                        alpha_norm = (alpha_score - min(s for _, s in selected)) / (
-                            max(s for _, s in selected) - min(s for _, s in selected) + 1e-8
-                        )
+                        alpha_norm = (alpha_score - score_min) / score_range
                         risk_factors[symbol] = risk_factor * (0.5 + 0.5 * alpha_norm)
                     else:
                         # No per-stock risk data — use neutral factor
