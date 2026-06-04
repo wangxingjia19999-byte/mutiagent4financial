@@ -21,6 +21,7 @@ import os
 import warnings
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -254,48 +255,55 @@ def resolve_symbols(args) -> list:
 
         # For full-market CN universes, use multi-factor pre-screening
         if args.universe in ("all_cn", "liquid_cn") and not args.no_filter:
-            print("  🧠 Running multi-factor pre-screener (5000+ → 200 candidates)...")
+            # If market cap filter is active, oversample to have enough after filtering
+            screen_top_n = getattr(args, 'max_universe', 200)
+            if getattr(args, 'max_market_cap', None):
+                screen_top_n = max(screen_top_n, 300)  # oversample for market cap filter
+            print(f"  🧠 Running multi-factor pre-screener (5000+ → {screen_top_n} candidates)...")
             try:
                 from data.providers.full_market_screener import FullMarketScreener
                 screener = FullMarketScreener()
                 symbols = screener.screen(
-                    top_n=getattr(args, 'max_universe', 200),
+                    top_n=screen_top_n,
                     fetch_historical=True,
                 )
                 if symbols and len(symbols) >= 50:
                     print(f"  ✅ Pre-screened to {len(symbols)} high-quality candidates")
                     print(f"     Top 10: {', '.join(symbols[:10])}")
-                    return symbols
-                print("  ⚠️  Pre-screener returned insufficient results — falling back to cache")
+                else:
+                    print("  ⚠️  Pre-screener returned insufficient results — falling back to cache")
+                    symbols = None
             except Exception as e:
                 print(f"  ⚠️  Pre-screener failed ({e}) — falling back to cache")
+                symbols = None
 
-        symbols = get_market_universe_cached(
-            scope=args.universe,
-            apply_filters=not args.no_filter,
-            market=market,
-        )
+        # Fallback to cached universe if screener didn't return enough symbols
+        if not symbols:
+            symbols = get_market_universe_cached(
+                scope=args.universe,
+                apply_filters=not args.no_filter,
+                market=market,
+            )
         if not symbols:
             source = "Tushare" if market == "cn" else "Alpaca"
             print(f"  ERROR: No symbols returned from {source}. Check API keys or try --symbol.")
             sys.exit(1)
 
-        # If still too many symbols, apply hard cap and warn
-        max_universe = getattr(args, 'max_universe', 500)
-        if len(symbols) > max_universe:
-            print(f"  ⚠️  Truncating {len(symbols)} -> {max_universe} symbols (use --max-universe to adjust)")
-            # Take evenly-spaced sample to maintain diversification
-            step = len(symbols) // max_universe
-            symbols = symbols[::step][:max_universe] if step > 1 else symbols[:max_universe]
-
-        print(f"  Loaded {len(symbols)} symbols (e.g. {', '.join(symbols[:10])}...)")
-
-        # ── Market cap filter (small/mid-cap only) ──
+        # ── Market cap filter (run BEFORE truncation so we have enough candidates) ──
         if getattr(args, 'max_market_cap', None):
             symbols = _apply_market_cap_filter(symbols, args.max_market_cap, market)
             if not symbols:
                 print("  ERROR: No symbols passed market cap filter. Try a larger --max-market-cap.")
                 sys.exit(1)
+
+        # If still too many symbols, apply hard cap and warn
+        max_universe = getattr(args, 'max_universe', 500)
+        if len(symbols) > max_universe:
+            print(f"  ⚠️  Truncating {len(symbols)} -> {max_universe} symbols (use --max-universe to adjust)")
+            step = len(symbols) // max_universe
+            symbols = symbols[::step][:max_universe] if step > 1 else symbols[:max_universe]
+
+        print(f"  Loaded {len(symbols)} symbols (e.g. {', '.join(symbols[:10])}...)")
 
         return symbols
 
@@ -370,28 +378,34 @@ def _filter_cn_market_cap(symbols: List[str], max_cap_cny: float) -> List[str]:
 
             passed = []
             total_mvs = []
+            checked_count = 0
             for i, sym in enumerate(symbols):
                 try:
                     df = pro.daily_basic(ts_code=sym, trade_date=today_str, fields="ts_code,total_mv")
                     if df is not None and not df.empty:
+                        checked_count += 1
                         mv_wan = float(df['total_mv'].iloc[0])  # 万元
                         mv_cny = mv_wan * 1e4  # → 元
                         if 0 < mv_cny <= max_cap_cny:
                             passed.append(sym)
                             total_mvs.append(mv_cny)
-                    if (i + 1) % 50 == 0:
-                        print(f"    ... checked {i + 1}/{len(symbols)}")
-                except Exception:
-                    continue  # skip this stock
+                    if (i + 1) % 20 == 0:
+                        print(f"    ... checked {i + 1}/{len(symbols)} (passed {len(passed)} so far)")
+                    time.sleep(0.08)
+                except Exception as e:
+                    if i < 3:
+                        print(f"    ⚠️  Tushare query failed for {sym}: {e}")
+                    continue
 
-            if passed:
+            if checked_count > 0:
+                # Queries succeeded — report results even if 0 passed
                 excluded = len(symbols) - len(passed)
                 avg_cap = (sum(total_mvs) / len(total_mvs)) / 1e8 if total_mvs else 0
                 print(f"  📏 Market cap ≤ {max_cap_yi:.0f}亿 (via Tushare): "
                       f"{len(passed)} stocks kept (avg {avg_cap:.0f}亿, excluded {excluded})")
                 return passed
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"    ⚠️  Tushare fallback failed: {e}")
 
     # ── Fallback: keep all ──
     print(f"  ⚠️  Market cap filter unavailable — keeping all {len(symbols)} symbols")
