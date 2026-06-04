@@ -121,114 +121,18 @@ except ImportError as e:
 class BacktestAgent(Agent):
     def __init__(self):
         self.name = "BacktestAgent"
-        self.description = "An agent that performs backtesting of trading strategies using historical market data and Qlib framework."
+        self.description = "An agent that performs backtesting of trading strategies using historical market data."
         self.tools = [
             function_tool(
-                func=self.initialize_qlib_data,
-                name="initialize_qlib_data", 
-                description="Initialize Qlib data provider and load market data."
-            ),
-            function_tool(
-                func=self.create_alpha_factor_strategy,
-                name="create_alpha_factor_strategy",
-                description="Create trading strategy based on alpha factor proposals."
-            ),
-            function_tool(
-                func=self.run_comprehensive_backtest,
-                name="run_comprehensive_backtest", 
-                description="Run comprehensive backtest using Qlib framework with risk analysis."
-            ),
-            function_tool(
-                func=self.analyze_factor_performance,
-                name="analyze_factor_performance",
-                description="Analyze individual factor performance and attribution."
-            ),
-            function_tool(
-                func=self.generate_detailed_report,
-                name="generate_detailed_report",
-                description="Generate detailed performance report with visualizations."
-            ),
-            function_tool(
-                func=self.optimize_strategy_parameters,
-                name="optimize_strategy_parameters",
-                description="Optimize strategy parameters using walk-forward analysis."
-            ),
-            function_tool(
-                func=self.calculate_transaction_costs,
-                name="calculate_transaction_costs",
-                description="Calculate realistic transaction costs and slippage impact."
-            ),
-            function_tool(
-                func=self.run_qlib_backtest,
-                name="run_qlib_backtest",
-                description="Run backtest using native Qlib framework with proper strategy and executor configuration."
-            ),
-            function_tool(
-                func=self.create_qlib_strategy,
-                name="create_qlib_strategy",
-                description="Create a proper Qlib trading strategy (TopK, Weight-based, etc.)."
-            ),
-            function_tool(
-                func=self.setup_qlib_dataset,
-                name="setup_qlib_dataset",
-                description="Setup Qlib dataset with proper data handlers and processors."
-            ),
-            function_tool(
-                func=self.run_long_short_backtest,
-                name="run_long_short_backtest",
-                description="Run long-short backtest using Qlib's native long_short_backtest function."
-            ),
-            function_tool(
-                func=self.create_portfolio_analysis,
-                name="create_portfolio_analysis",
-                description="Create comprehensive portfolio analysis using Qlib's risk and performance metrics."
-            ),
-            function_tool(
-                func=self.initialize_qlib_system,
-                name="initialize_qlib_system",
-                description="Initialize Qlib system with proper data provider and configuration."
-            ),
-            # Advanced Qlib Features
-            function_tool(
-                func=self.run_enhanced_backtest,
-                name="run_enhanced_backtest",
-                description="Run enhanced backtest with multiple executor types and advanced risk analysis."
-            ),
-            function_tool(
-                func=self.train_qlib_model,
-                name="train_qlib_model", 
-                description="Train Qlib machine learning models for prediction."
-            ),
-            function_tool(
-                func=self.analyze_factor_ic,
-                name="analyze_factor_ic",
-                description="Analyze factor Information Coefficient (IC) using Qlib."
-            ),
-            function_tool(
-                func=self.optimize_portfolio_weights,
-                name="optimize_portfolio_weights",
-                description="Optimize portfolio weights using Qlib portfolio optimization."
-            ),
-            function_tool(
-                func=self.run_walk_forward_analysis,
-                name="run_walk_forward_analysis",
-                description="Run walk-forward analysis for strategy validation."
+                func=self.run_simple_backtest_paper_interface,
+                name="run_simple_backtest_paper_interface",
+                description="Run backtest with market data, predictions, and capital. Returns total return, Sharpe, max drawdown, volatility."
             ),
             function_tool(
                 func=self.calculate_advanced_risk_metrics,
                 name="calculate_advanced_risk_metrics",
-                description="Calculate advanced risk metrics including VaR, CVaR, Sortino ratio."
+                description="Calculate advanced risk metrics: VaR, CVaR, Sortino ratio, skewness, kurtosis from return series."
             ),
-            function_tool(
-                func=self.run_factor_attribution_analysis,
-                name="run_factor_attribution_analysis",
-                description="Run comprehensive factor attribution analysis using Qlib."
-            ),
-            function_tool(
-                func=self.run_simple_backtest_paper_interface,
-                name="run_simple_backtest_paper_interface",
-                description="Run simple backtest following paper interface design (Alpha Model, Risk Model, Transaction Cost Model)."
-            )
         ]
 
         # Call parent Agent.__init__ to set up LLM client, instructions, etc.

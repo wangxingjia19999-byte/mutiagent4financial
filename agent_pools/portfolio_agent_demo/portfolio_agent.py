@@ -35,6 +35,181 @@ from agent_pools.alpha_agent_pool.local_agents import Agent, function_tool
 
 
 # ==============================
+# Sector Mapping (for sector neutrality)
+# ==============================
+
+# Compact sector map for common US/CN stocks. Falls back to "Other" for unknowns.
+_STOCK_SECTORS = {
+    # Tech
+    "AAPL": "Tech", "MSFT": "Tech", "GOOGL": "Tech", "GOOG": "Tech",
+    "META": "Tech", "NVDA": "Tech", "AMD": "Tech", "INTC": "Tech",
+    "ADBE": "Tech", "CRM": "Tech", "ORCL": "Tech", "CSCO": "Tech",
+    "IBM": "Tech", "QCOM": "Tech", "TXN": "Tech", "AMAT": "Tech",
+    "AVGO": "Tech", "ADSK": "Tech", "NOW": "Tech", "INTU": "Tech",
+    "TSLA": "Auto", "F": "Auto", "GM": "Auto", "RIVN": "Auto",
+    # Finance
+    "JPM": "Finance", "BAC": "Finance", "WFC": "Finance", "GS": "Finance",
+    "MS": "Finance", "C": "Finance", "BLK": "Finance", "SCHW": "Finance",
+    "AXP": "Finance", "V": "Finance", "MA": "Finance", "PYPL": "Finance",
+    # Healthcare
+    "JNJ": "Healthcare", "PFE": "Healthcare", "MRK": "Healthcare",
+    "ABBV": "Healthcare", "BMY": "Healthcare", "LLY": "Healthcare",
+    "UNH": "Healthcare", "CVS": "Healthcare", "AMGN": "Healthcare",
+    # Consumer
+    "AMZN": "Consumer", "WMT": "Consumer", "COST": "Consumer", "HD": "Consumer",
+    "MCD": "Consumer", "NKE": "Consumer", "SBUX": "Consumer", "TGT": "Consumer",
+    "LOW": "Consumer", "TJX": "Consumer",
+    # Energy
+    "XOM": "Energy", "CVX": "Energy", "COP": "Energy", "SLB": "Energy",
+    "EOG": "Energy", "PXD": "Energy", "OXY": "Energy",
+    # Communication
+    "NFLX": "Comm", "DIS": "Comm", "CMCSA": "Comm", "T": "Comm", "VZ": "Comm",
+    # Industrial
+    "BA": "Industrial", "CAT": "Industrial", "GE": "Industrial", "HON": "Industrial",
+    "UPS": "Industrial", "RTX": "Industrial", "LMT": "Industrial",
+    # Real Estate / Other
+    "PLTR": "Tech", "UBER": "Tech", "ABNB": "Tech", "SNOW": "Tech",
+}
+
+_STOCK_SECTORS_CN = {
+    "600519.SH": "白酒", "000858.SZ": "白酒", "000568.SZ": "白酒",
+    "601318.SH": "金融", "600036.SH": "金融", "601398.SH": "金融",
+    "600276.SH": "医药", "000538.SZ": "医药", "300760.SZ": "医药",
+    "000002.SZ": "地产", "600048.SH": "地产",
+    "300750.SZ": "新能源", "601012.SH": "新能源", "002594.SZ": "新能源",
+    "600900.SH": "电力", "601985.SH": "电力",
+    "002415.SZ": "科技", "000725.SZ": "科技",
+    "601899.SH": "矿业", "600585.SH": "建材",
+}
+
+_SECTOR_MAP = {**_STOCK_SECTORS, **_STOCK_SECTORS_CN}
+
+
+def get_sector(symbol: str) -> str:
+    """Get sector for a symbol. Returns 'Other' if unknown."""
+    return _SECTOR_MAP.get(symbol.upper(), "Other")
+
+
+# ==============================
+# Covariance-Based Optimization
+# ==============================
+
+def _compute_covariance_weights(
+    symbols: List[str],
+    price_data: pd.DataFrame,
+    alloc_pct: float,
+    method: str = "risk_parity",
+) -> Dict[str, float]:
+    """
+    Compute portfolio weights using covariance matrix from historical returns.
+
+    Methods:
+      - risk_parity: w_i ∝ 1/σ_i (inverse volatility). Robust, no matrix inversion.
+      - min_variance: minimize wᵀΣw subject to Σw = alloc_pct. Requires Σ invertible.
+
+    Falls back to equal-weight if covariance computation fails.
+    """
+    n = len(symbols)
+    if n < 2:
+        return {symbols[0]: alloc_pct} if n == 1 else {}
+
+    try:
+        # Compute returns from price data
+        if 'symbol' in price_data.columns:
+            returns = price_data.pivot_table(
+                index='date', columns='symbol', values='close', aggfunc='last'
+            ).pct_change().dropna(how='all')
+        else:
+            returns = price_data['close'].pct_change().dropna().to_frame()
+
+        # Keep only our target symbols
+        available = [s for s in symbols if s in returns.columns]
+        if len(available) < 2:
+            return {s: alloc_pct / len(symbols) for s in symbols}
+
+        returns = returns[available].dropna()
+
+        if method == "risk_parity":
+            # Inverse-vol weighting: w_i ∝ 1/σ_i
+            vols = returns.std()
+            inv_vols = 1.0 / (vols + 1e-8)
+            raw_weights = inv_vols / inv_vols.sum() * alloc_pct
+            weights = {s: float(raw_weights[s]) for s in available}
+
+        elif method == "min_variance":
+            # Minimum variance: w = Σ⁻¹1 / (1ᵀΣ⁻¹1) * alloc_pct
+            cov = returns.cov().values
+            ones = np.ones(len(available))
+            try:
+                cov_inv = np.linalg.pinv(cov)  # pseudoinverse for stability
+                raw = cov_inv @ ones
+                raw = raw / raw.sum() * alloc_pct
+                weights = {s: float(raw[i]) for i, s in enumerate(available)}
+            except np.linalg.LinAlgError:
+                # Fallback to inverse-vol
+                vols = returns.std()
+                inv_vols = 1.0 / (vols + 1e-8)
+                raw = inv_vols / inv_vols.sum() * alloc_pct
+                weights = {s: float(raw[s]) for s in available}
+        else:
+            weights = {s: alloc_pct / len(symbols) for s in symbols}
+
+        # Fill in any missing symbols
+        for s in symbols:
+            if s not in weights:
+                weights[s] = 0.0
+
+        return weights
+
+    except Exception as e:
+        # Fallback to equal weight
+        print(f"WARNING: Covariance optimization failed ({e}), using equal weight.")
+        w = alloc_pct / len(symbols)
+        return {s: w for s in symbols}
+
+
+# ==============================
+# Sector Neutrality
+# ==============================
+
+def apply_sector_neutrality(
+    signals: Dict[str, float],
+) -> Dict[str, float]:
+    """
+    Remove sector biases from signals.
+
+    For each sector, compute the mean signal and subtract it from each stock
+    in that sector. This ensures signals reflect stock-specific alpha, not
+    sector-level bets (e.g., "all tech stocks look good because tech is hot").
+    """
+    if len(signals) < 3:
+        return signals  # too few stocks for meaningful sector adjustment
+
+    # Group by sector
+    sectors: Dict[str, List[str]] = {}
+    for sym in signals:
+        sec = get_sector(sym)
+        if sec not in sectors:
+            sectors[sec] = []
+        sectors[sec].append(sym)
+
+    # Only neutralize if we have multiple sectors and stocks per sector
+    if len(sectors) < 2:
+        return signals
+
+    # Subtract sector mean from each stock
+    neutralized = dict(signals)
+    for sec, syms in sectors.items():
+        if len(syms) < 2:
+            continue
+        sec_mean = np.mean([signals[s] for s in syms])
+        for s in syms:
+            neutralized[s] = signals[s] - sec_mean
+
+    return neutralized
+
+
+# ==============================
 # Internal Logic
 # ==============================
 
@@ -45,15 +220,18 @@ def _construct_portfolio_impl(
     current_portfolio: Any = None,
     total_capital: float = 100000.0,
     max_positions: int = 20,
+    price_data: pd.DataFrame = None,
+    optimize_method: str = "risk_parity",
 ) -> Dict[str, Any]:
     """
     Build target portfolio weights from alpha signals, risk-adjusted per stock.
 
     Weighting logic:
       1. Global capital allocation: scaled by overall_risk_level (LOW=100%, MODERATE=80%, HIGH=50%)
-      2. Per-stock risk adjustment: safer stocks get larger weights (risk-parity inspired)
-      3. Per-stock position caps: enforced from risk agent's per-stock assessment
-      4. Fallback: equal-weight if no per-stock risk data available
+      2. Covariance optimization (if price_data provided): risk parity or min variance
+      3. Per-stock risk adjustment: safer stocks get larger weights (fallback)
+      4. Per-stock position caps: enforced from risk agent's per-stock assessment
+      5. Fallback: equal-weight if no per-stock risk data available
     """
     try:
         # 1. Parse alpha signals
@@ -92,40 +270,57 @@ def _construct_portfolio_impl(
             selected = ranked[:max_positions]
 
             if selected:
-                # ── Risk-adjusted weighting ──
-                # Precompute alpha score range for normalization (avoid O(n²) in loop)
-                all_scores = [s for _, s in selected]
-                score_min = min(all_scores)
-                score_max = max(all_scores)
-                score_range = (score_max - score_min) + 1e-8
+                selected_symbols = [s for s, _ in selected]
 
-                risk_factors: Dict[str, float] = {}
+                # ── Covariance-optimized weighting (preferred, if data available) ──
+                if price_data is not None and len(selected_symbols) >= 2:
+                    try:
+                        cov_weights = _compute_covariance_weights(
+                            selected_symbols, price_data, alloc_pct, method=optimize_method
+                        )
+                        if cov_weights:
+                            weight_method = optimize_method
+                            for symbol in selected_symbols:
+                                cap = per_stock_risk.get(symbol, {}).get("position_cap", 0.20)
+                                target_weights[symbol] = round(min(cov_weights.get(symbol, 0), cap), 6)
+                    except Exception as e:
+                        print(f"WARNING: Covariance optimization failed ({e}), using heuristic.")
 
-                for symbol, alpha_score in selected:
-                    stock_risk = per_stock_risk.get(symbol, {})
-                    stock_risk_score = stock_risk.get("risk_score")
+                # ── Heuristic risk-adjusted weighting (fallback) ──
+                if not target_weights:
+                    # Precompute alpha score range for normalization (avoid O(n²) in loop)
+                    all_scores = [s for _, s in selected]
+                    score_min = min(all_scores)
+                    score_max = max(all_scores)
+                    score_range = (score_max - score_min) + 1e-8
 
-                    if stock_risk_score is not None:
-                        # Inverse risk weighting: safer stocks get higher weights
-                        # risk_score 0.0 → factor 1.0, risk_score 0.5 → factor ~0.55, risk_score 1.0 → factor ~0.33
-                        risk_factor = 1.0 / (1.0 + 2.0 * stock_risk_score)
-                        # Blend with alpha signal strength
-                        alpha_norm = (alpha_score - score_min) / score_range
-                        risk_factors[symbol] = risk_factor * (0.5 + 0.5 * alpha_norm)
-                    else:
-                        # No per-stock risk data — use neutral factor
-                        risk_factors[symbol] = 1.0
+                    risk_factors: Dict[str, float] = {}
 
-                # Normalize risk factors to sum to alloc_pct
-                total_factor = sum(risk_factors.values())
-                if total_factor > 0:
-                    weight_method = "risk_adjusted"
-                    for symbol in risk_factors:
-                        raw_weight = (risk_factors[symbol] / total_factor) * alloc_pct
+                    for symbol, alpha_score in selected:
+                        stock_risk = per_stock_risk.get(symbol, {})
+                        stock_risk_score = stock_risk.get("risk_score")
 
-                        # Apply per-stock position cap from risk agent (soft cap)
-                        cap = per_stock_risk.get(symbol, {}).get("position_cap", 0.15)
-                        target_weights[symbol] = round(raw_weight, 6)
+                        if stock_risk_score is not None:
+                            # Inverse risk weighting: safer stocks get higher weights
+                            # risk_score 0.0 → factor 1.0, risk_score 0.5 → factor ~0.55, risk_score 1.0 → factor ~0.33
+                            risk_factor = 1.0 / (1.0 + 2.0 * stock_risk_score)
+                            # Blend with alpha signal strength
+                            alpha_norm = (alpha_score - score_min) / score_range
+                            risk_factors[symbol] = risk_factor * (0.5 + 0.5 * alpha_norm)
+                        else:
+                            # No per-stock risk data — use neutral factor
+                            risk_factors[symbol] = 1.0
+
+                    # Normalize risk factors to sum to alloc_pct
+                    total_factor = sum(risk_factors.values())
+                    if total_factor > 0:
+                        weight_method = "risk_adjusted"
+                        for symbol in risk_factors:
+                            raw_weight = (risk_factors[symbol] / total_factor) * alloc_pct
+
+                            # Apply per-stock position cap from risk agent (soft cap)
+                            cap = per_stock_risk.get(symbol, {}).get("position_cap", 0.15)
+                            target_weights[symbol] = round(raw_weight, 6)
 
                     # Re-normalize: if total < alloc_pct because caps constrained us,
                     # scale all weights proportionally until we hit alloc_pct or caps.
@@ -444,22 +639,15 @@ class PortfolioAgent:
         current_portfolio: Optional[Dict[str, float]] = None,
         total_capital: float = 100000.0,
         max_positions: int = 20,
+        price_data: pd.DataFrame = None,
     ) -> Dict[str, Any]:
         tx_costs = transaction_costs or {"fixed_cost": 1.0, "slippage": 0.0001}
-
-        context = {
-            'alpha_signals': alpha_signals,
-            'risk_signals': risk_signals,
-            'transaction_costs': tx_costs,
-            'current_portfolio': current_portfolio,
-            'total_capital': total_capital,
-            'max_positions': max_positions,
-        }
 
         # Use local implementation directly — faster and more reliable than LLM round-trip
         result = _construct_portfolio_impl(
             alpha_signals, risk_signals, tx_costs,
-            current_portfolio, total_capital, max_positions
+            current_portfolio, total_capital, max_positions,
+            price_data=price_data,
         )
         return result
 

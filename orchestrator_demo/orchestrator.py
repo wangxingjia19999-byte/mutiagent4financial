@@ -599,6 +599,7 @@ class Orchestrator:
                 risk_signals=risk_result,
                 total_capital=total_capital,
                 max_positions=max_positions,
+                price_data=test_data,  # enables covariance optimization
             )
 
             if portfolio_result.get("status") != "success":
@@ -720,7 +721,7 @@ class Orchestrator:
                 # Align and train
                 try:
                     from agent_pools.alpha_agent_demo.alpha_signal_agent import _train_model_and_predict
-                    model_res = _train_model_and_predict(X_train, y_train, X_test, 'lightgbm')
+                    model_res = _train_model_and_predict(X_train, y_train, X_test, 'ensemble')
 
                     if model_res['status'] == 'success':
                         preds = pd.Series(model_res['predictions'], index=test_data_slice.index)
@@ -942,6 +943,7 @@ class Orchestrator:
                 risk_signals=risk_result,
                 total_capital=total_capital,
                 max_positions=max_positions,
+                price_data=test_data,  # enables covariance optimization
             )
 
             target_weights = portfolio_result.get("target_weights", {})
