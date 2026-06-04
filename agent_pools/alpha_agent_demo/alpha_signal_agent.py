@@ -282,42 +282,58 @@ def _train_model_and_predict(
         if train_aligned.empty:
              return {"status": "error", "message": "Insufficient training data (after alignment/drop na)"}
 
-        X_train_clean = train_aligned.iloc[:, :-1]
-        y_train_clean = train_aligned.iloc[:, -1]
-        
+        X_train_full = train_aligned.iloc[:, :-1]
+        y_train_full = train_aligned.iloc[:, -1]
+
+        # Validation holdout: last 20% of training data for early stopping
+        n_val = max(int(len(X_train_full) * 0.2), 10)
+        X_val, y_val = X_train_full.iloc[-n_val:], y_train_full.iloc[-n_val:]
+        X_train_clean, y_train_clean = X_train_full.iloc[:-n_val], y_train_full.iloc[:-n_val]
+
         # Handle Test Data (fill NaNs in features with 0 or drop?)
-        # For prediction, we shouldn't drop rows if possible, but if features are NaN (e.g. first 14 days), we can't predict.
-        # So we fillNa or drop.
-        X_test_clean = X_test.fillna(0) # Simple imputation
-        
+        X_test_clean = X_test.fillna(0)
+
         preds_series = pd.Series(index=X_test.index, dtype=float)
 
         # ── Ensemble: blend LightGBM + RandomForest + Ridge for robustness ──
         if model_type == "ensemble":
             try:
                 import lightgbm as lgb
+                # LightGBM with early stopping on validation set
+                lgbm_model = lgb.LGBMRegressor(
+                    n_estimators=200, max_depth=6, num_leaves=31,
+                    learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
+                    random_state=42, verbose=-1, n_jobs=-1,
+                )
+                lgbm_model.fit(
+                    X_train_clean, y_train_clean,
+                    eval_set=[(X_val, y_val)],
+                    eval_metric='l2',
+                    callbacks=[lgb.early_stopping(20), lgb.log_evaluation(0)],
+                )
+                best_iter = lgbm_model.best_iteration_
                 models = {
-                    'lgbm': lgb.LGBMRegressor(
-                        n_estimators=100, max_depth=6, num_leaves=31,
-                        learning_rate=0.05, subsample=0.8, colsample_bytree=0.8,
-                        random_state=42, verbose=-1, n_jobs=-1,
-                    ),
+                    'lgbm': lgbm_model,
                     'rf': RandomForestRegressor(
                         n_estimators=100, max_depth=8, random_state=42, n_jobs=-1,
                     ),
-                    'ridge': LinearRegression(),  # Ridge-style via linear on standardized features
+                    'ridge': LinearRegression(),
                 }
                 all_preds = []
                 for name, m in models.items():
-                    m.fit(X_train_clean, y_train_clean)
+                    if name != 'lgbm':  # already trained
+                        m.fit(X_train_full, y_train_full)  # full train for non-LGBM
                     all_preds.append(m.predict(X_test_clean))
-                # Simple average ensemble
                 preds = np.mean(all_preds, axis=0)
                 preds_series.loc[X_test_clean.index] = preds
                 return {
                     "status": "success",
-                    "predictions": preds_series.to_dict(),
-                    "model_info": {"type": "ensemble", "members": list(models.keys())},
+                    "predictions": preds_series,  # keep as Series, avoid dict round-trip
+                    "model_info": {
+                        "type": "ensemble",
+                        "members": list(models.keys()),
+                        "lgbm_best_iter": best_iter,
+                    },
                 }
             except ImportError:
                 print("WARNING: lightgbm not installed for ensemble, falling back to random_forest.")
@@ -327,7 +343,7 @@ def _train_model_and_predict(
                 preds_series.loc[X_test_clean.index] = preds
                 return {
                     "status": "success",
-                    "predictions": preds_series.to_dict(),
+                    "predictions": preds_series,  # keep as Series, avoid dict round-trip
                     "model_info": {"type": "random_forest"},
                 }
 
@@ -359,7 +375,7 @@ def _train_model_and_predict(
         
         return {
             "status": "success",
-            "predictions": preds_series.to_dict(),
+            "predictions": preds_series,  # keep as Series, avoid dict round-trip
             "model_info": {"type": model_type}
         }
     except Exception as e:
@@ -414,7 +430,9 @@ def _run_alpha_pipeline_impl(
         #    Standard quant approach: rank predictions within each date to remove
         #    market beta and focus on relative outperformance. Signal strength
         #    is the rank percentile (0=worst, 1=best), centered to [-0.5, 0.5].
-        preds = pd.Series(model_res['predictions'])
+        preds = model_res['predictions']
+        if not isinstance(preds, pd.Series):
+            preds = pd.Series(preds)  # backward compat with old .to_dict() format
 
         # Restore index to (date, symbol) for cross-sectional ranking
         data_norm = test_data.copy()

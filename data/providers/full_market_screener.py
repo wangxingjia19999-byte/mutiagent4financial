@@ -135,7 +135,7 @@ class FullMarketScreener:
         logger.info("Using trade date: %s", trade_date)
 
         all_dfs = []
-        batch_size = 200  # Tushare allows relatively large batches
+        batch_size = 500  # Tushare supports 500+ ts_codes in a single daily() call
 
         total_batches = (len(symbols) + batch_size - 1) // batch_size
 
@@ -152,13 +152,14 @@ class FullMarketScreener:
                 if df is not None and not df.empty:
                     all_dfs.append(df)
             except Exception as e:
-                logger.debug("Batch %d failed: %s", batch_num, e)
+                logger.warning("Snapshot batch %d/%d failed (%d symbols): %s",
+                               batch_num, total_batches, len(batch), e)
 
-            if batch_num % 15 == 0:
+            if batch_num % 10 == 0:
                 logger.info("  Snapshot batch %d/%d (%d symbols)",
                             batch_num, total_batches, min(i + batch_size, len(symbols)))
 
-            time.sleep(0.3)  # Rate limit
+            time.sleep(0.15)  # Rate limit (tuned for 500-ts_code batches)
 
         if all_dfs:
             result = pd.concat(all_dfs, ignore_index=True)
@@ -195,7 +196,7 @@ class FullMarketScreener:
                     all_dfs.append(df)
             except Exception:
                 pass
-            time.sleep(0.25)
+            time.sleep(0.12)  # rate limit, reduced from 0.25s
 
         if all_dfs:
             return pd.concat(all_dfs, ignore_index=True)
