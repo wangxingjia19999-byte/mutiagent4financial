@@ -45,6 +45,7 @@ from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent impor
 from market import MarketConfig, US_MARKET, CN_MARKET, USMarketCalendar, CNMarketCalendar
 from data.providers.alpaca_provider import AlpacaProvider
 from data.providers.tushare_provider import TushareProvider
+from data.providers.akshare_provider import AkshareProvider
 from broker import AlpacaBroker, CNPaperBroker
 
 # Ensure project root is on path for imports
@@ -317,8 +318,12 @@ def _create_market_components(market: str, capital: float, broker_type: str = "p
             broker._paper._data_provider = provider
             return config, provider, broker, calendar
         else:
-            # Paper simulation (default)
-            provider = TushareProvider()
+            # Paper simulation (default) — try akshare first (free, no token),
+            # fall back to Tushare if akshare fails
+            provider = AkshareProvider()
+            if not provider.is_available:
+                print("  ⚠️  Akshare unavailable, trying Tushare...")
+                provider = TushareProvider()
             broker = CNPaperBroker(
                 initial_capital=capital, config=config, data_provider=provider
             )
