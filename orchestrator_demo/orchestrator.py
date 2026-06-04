@@ -150,6 +150,15 @@ class Orchestrator:
         self.portfolio_agent = PortfolioAgent(name="PortfolioCore", model=self.poe_model)
         self.backtest_agent = BacktestAgent()
 
+        # ── News Sentiment Agent (optional) ──
+        self.news_agent = None
+        try:
+            from agent_pools.news_agent import NewsSentimentAgent
+            self.news_agent = NewsSentimentAgent()
+            logger.info("News sentiment agent ready")
+        except Exception as e:
+            logger.info("News agent unavailable (%s)", e)
+
         # Pipeline Context (Shared Memory)
         self.pipeline_context = {}
 
@@ -164,6 +173,42 @@ class Orchestrator:
 
         # Initialize Manager with Agent-as-Tool pattern
         self._initialize_manager_agent()
+
+    # ═══════════════════════════════════════════════════════════════
+    # News Sentiment Blending
+    # ═══════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _blend_news_sentiment(alpha_result: Dict, news_sentiment: Dict) -> Dict:
+        """
+        Blend news sentiment into alpha signals: 80% alpha + 20% news.
+
+        News sentiment [-1, 1] is scaled to match alpha signal range and added
+        as a modifier. This gives news a meaningful but bounded influence on
+        the final signal.
+        """
+        signals = alpha_result.get("signals", {})
+        if not signals or not news_sentiment:
+            return alpha_result
+
+        blended = dict(signals)
+        news_weight = 0.20  # 20% news influence
+
+        for key, alpha_score in signals.items():
+            # Extract symbol from key (handles both tuple and string keys)
+            if isinstance(key, tuple):
+                sym = key[1] if len(key) > 1 else key[0]
+            else:
+                sym = str(key)
+
+            news_score = news_sentiment.get(sym, 0.0)
+            if news_score != 0.0:
+                # Blend: 80% alpha + 20% news (news_scaled to similar range)
+                blended[key] = alpha_score * (1 - news_weight) + news_score * 0.5 * news_weight
+
+        alpha_result["signals"] = blended
+        alpha_result["news_blended"] = True
+        return alpha_result
 
     # ═══════════════════════════════════════════════════════════════
     # Memory Helpers (Agent Self-Optimization)
@@ -651,11 +696,32 @@ class Orchestrator:
                 logger.info("Memory: recalled %d past lessons for this cycle", len(lessons))
                 self.pipeline_context['past_lessons'] = lessons
 
+            # 1c. News sentiment — analyze recent news for candidate stocks
+            news_sentiment = {}
+            if self.news_agent and self.news_agent.is_available:
+                try:
+                    news_result = self.news_agent.analyze(symbols, lookback_days=3)
+                    news_sentiment = news_result.get("sentiment", {})
+                    self.pipeline_context['news_sentiment'] = news_sentiment
+                    self.pipeline_context['news_narrative'] = news_result.get("narrative", "")
+                    self.pipeline_context['news_sector_impact'] = news_result.get("sector_impact", {})
+                    if news_sentiment:
+                        logger.info("News: analyzed %d stocks, sentiment range [%.2f, %.2f]",
+                                    len(news_sentiment),
+                                    min(news_sentiment.values()),
+                                    max(news_sentiment.values()))
+                except Exception as e:
+                    logger.debug("News analysis skipped: %s", e)
+
             # 2. Alpha Generation — Alpha158 factors + LightGBM by default
             alpha_result = self.alpha_agent.generate_signals_from_data(
                 data=test_data,  # Predict on Test
                 train_data=train_data,  # Train on History
             )
+
+            # 2b. Blend news sentiment into alpha signals (20% news + 80% alpha)
+            if news_sentiment and alpha_result.get("status") == "success":
+                alpha_result = self._blend_news_sentiment(alpha_result, news_sentiment)
             
             if alpha_result["status"] != "success":
                 return {"status": "error", "message": f"Alpha generation failed: {alpha_result.get('message')}"}
@@ -725,6 +791,8 @@ class Orchestrator:
             backtest_result["market_regime"] = risk_result.get("market_regime", "unknown")
             backtest_result["risk_narrative"] = risk_result.get("risk_narrative", "")
             backtest_result["exit_candidates"] = portfolio_result.get("exit_candidates", [])
+            backtest_result["news_narrative"] = self.pipeline_context.get("news_narrative", "")
+            backtest_result["news_sector_impact"] = self.pipeline_context.get("news_sector_impact", {})
 
             # 6. Memory: store lessons from this cycle for future self-optimization
             self._learn_from_cycle(

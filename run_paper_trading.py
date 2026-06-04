@@ -572,6 +572,10 @@ def print_backtest_result(result):
     if narrative:
         print(f"  📋 {narrative}")
 
+    news_narrative = result.get("news_narrative", "")
+    if news_narrative:
+        print(f"  📰 {news_narrative}")
+
     ec = result.get("exit_candidates", [])
     if ec:
         print(f"  Exit Candidates: {len(ec)} symbols")
@@ -786,6 +790,14 @@ def main():
     parser.add_argument(
         "--no-memory", action="store_true",
         help="Disable Neo4j memory storage/retrieval.",
+    )
+    parser.add_argument(
+        "--news", action="store_true", default=True,
+        help="Enable news sentiment analysis (default: on). Use --no-news to disable.",
+    )
+    parser.add_argument(
+        "--no-news", action="store_true",
+        help="Disable news sentiment analysis.",
     )
 
     args = parser.parse_args()
