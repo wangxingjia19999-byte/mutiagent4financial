@@ -156,21 +156,25 @@ def get_market_universe(
     api_key: str = None,
     secret_key: str = None,
     apply_filters: bool = True,
+    market: str = "us",
 ) -> List[str]:
     """
-    Get a list of tradeable US stock symbols.
+    Get a list of tradeable stock symbols.
 
     Args:
         scope: one of:
-            "all"     — every tradeable equity
-            "liquid"  — top ~2000 liquid stocks (price, volume filtered)
-            "sp500"   — top ~500 liquid stocks
-            "nasdaq100" — top ~100 liquid stocks
+            US: "all", "liquid", "sp500", "nasdaq100"
+            CN: "all_cn", "liquid_cn", "csi300", "csi500"
+        market: "us" (default) or "cn"
         apply_filters: If True, filter by price/volume after fetching.
 
     Returns:
         List of symbol strings.
     """
+    if market == "cn":
+        return _get_cn_market_universe(scope)
+
+    # ── US path (existing) ──
     assets = fetch_alpaca_assets(api_key=api_key, secret_key=secret_key)
 
     if not assets:
@@ -204,6 +208,60 @@ def get_market_universe(
         return candidates
 
 
+# ────────────────────────────────────────────────────────────────
+# A-Share Market Universe (via Tushare)
+# ────────────────────────────────────────────────────────────────
+
+_CN_UNIVERSE_CACHE: Optional[List[str]] = None
+
+
+def _get_cn_market_universe(scope: str = "liquid_cn") -> List[str]:
+    """Get A-share stock universe from Tushare."""
+    global _CN_UNIVERSE_CACHE
+
+    try:
+        from data.providers.tushare_provider import TushareProvider
+
+        provider = TushareProvider()
+        symbols = provider.get_universe(scope=scope, apply_filters=True)
+        if symbols:
+            _CN_UNIVERSE_CACHE = symbols
+            logger.info("A-share universe: %d symbols (scope=%s)", len(symbols), scope)
+            return symbols
+    except ImportError as e:
+        logger.warning("TushareProvider not available: %s", e)
+    except Exception as e:
+        logger.warning("A-share universe fetch failed: %s", e)
+
+    # Fallback: use cached symbols or empty list
+    if _CN_UNIVERSE_CACHE:
+        logger.info("Using cached A-share universe: %d symbols", len(_CN_UNIVERSE_CACHE))
+        return _apply_scope_cap(_CN_UNIVERSE_CACHE, scope)
+
+    # Last resort: return a minimal set of well-known A-shares
+    fallback = [
+        "000001.SZ", "000002.SZ", "000858.SZ", "002415.SZ", "300750.SZ",
+        "600000.SH", "600036.SH", "600276.SH", "600519.SH", "601318.SH",
+        "000333.SZ", "002594.SZ", "300059.SZ", "600900.SH", "601166.SH",
+        "000651.SZ", "002142.SZ", "300124.SZ", "600030.SH", "601398.SH",
+        "000725.SZ", "002475.SZ", "300760.SZ", "600585.SH", "601899.SH",
+        "000063.SZ", "002714.SZ", "300498.SZ", "600809.SH", "603288.SH",
+    ]
+    return _apply_scope_cap(sorted(fallback), scope)
+
+
+def _apply_scope_cap(symbols: List[str], scope: str) -> List[str]:
+    """Apply scope-based truncation."""
+    caps = {
+        "csi300": 300,
+        "csi500": 500,
+        "liquid_cn": 2000,
+        "all_cn": len(symbols),
+    }
+    cap = caps.get(scope, len(symbols))
+    return sorted(symbols)[:cap]
+
+
 # ---------------------------------------------------------------
 # Cache helpers
 # ---------------------------------------------------------------
@@ -231,30 +289,45 @@ def get_market_universe_cached(
     secret_key: str = None,
     max_age_hours: int = 24,
     apply_filters: bool = True,
+    market: str = "us",
 ) -> List[str]:
     """
-    Get market universe with disk caching (avoid repeated Alpaca API calls).
+    Get market universe with disk caching (avoid repeated API calls).
 
     Args:
+        market: "us" or "cn"
         max_age_hours: Re-fetch if cache is older than this.
     """
-    if _CACHE_FILE.exists():
-        age_seconds = time.time() - _CACHE_FILE.stat().st_mtime
+    # Separate cache files for US and CN
+    cache_file = _CACHE_FILE.parent / f"market_universe_{market}.txt"
+
+    if cache_file.exists():
+        age_seconds = time.time() - cache_file.stat().st_mtime
         if age_seconds < max_age_hours * 3600:
-            cached = load_cached_symbols()
-            if cached:
-                # Scope-based truncation on cached list
-                if scope == "nasdaq100":
-                    return cached[:100]
-                elif scope == "sp500":
-                    return cached[:500]
-                elif scope == "liquid":
-                    return cached[:2000]
-                return cached
+            try:
+                content = cache_file.read_text().strip()
+                if content:
+                    cached = [s.strip() for s in content.splitlines() if s.strip()]
+                    if cached:
+                        # Scope-based truncation
+                        scope_caps = {
+                            "nasdaq100": 100, "sp500": 500, "liquid": 2000,
+                            "csi300": 300, "csi500": 500, "liquid_cn": 2000,
+                            "all": len(cached), "all_cn": len(cached),
+                        }
+                        cap = scope_caps.get(scope, len(cached))
+                        return cached[:cap]
+            except Exception:
+                pass
 
     symbols = get_market_universe(
-        scope=scope, api_key=api_key, secret_key=secret_key, apply_filters=apply_filters
+        scope=scope, api_key=api_key, secret_key=secret_key,
+        apply_filters=apply_filters, market=market,
     )
     if symbols:
-        save_cached_symbols(symbols)
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            cache_file.write_text("\n".join(symbols))
+        except Exception:
+            pass
     return symbols

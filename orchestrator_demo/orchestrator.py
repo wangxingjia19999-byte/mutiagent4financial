@@ -43,7 +43,9 @@ try:
     from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent import ExecutionAgent
     from agent_pools.backtest_agent_pool.backtest_agent import BacktestAgent
     from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent import (
-        is_market_open, market_status_str, alpaca_service,
+        is_market_open as _legacy_is_market_open,
+        market_status_str as _legacy_market_status_str,
+        alpaca_service as _legacy_alpaca_service,
     )
     from agent_pools.execution_agent_demo.execution_agent_demo.trade_journal import TradeJournal
     from agent_pools.portfolio_agent_demo.portfolio_agent import generate_orders
@@ -58,8 +60,23 @@ except ImportError as e:
     logger.error(f"Local agents sdk not found. {e}")
     sys.exit(1)
 
+# New abstractions (optional — graceful fallback if not installed)
+try:
+    from market import MarketConfig, US_MARKET, USMarketCalendar
+    from data.providers import DataProvider
+    from broker import Broker
+    _NEW_ABSTRACTIONS = True
+except ImportError:
+    logger.warning("New market abstractions not found. Using legacy US-only mode.")
+    _NEW_ABSTRACTIONS = False
+    MarketConfig = None
+    US_MARKET = None
+    USMarketCalendar = None
+    DataProvider = None
+    Broker = None
+
 # ------------------------------------------------------------------------------
-# Data Client
+# Data Client (legacy — used only when no DataProvider is injected)
 # ------------------------------------------------------------------------------
 try:
     StockHistoricalDataClient = importlib.import_module("alpaca.data.historical").StockHistoricalDataClient
@@ -75,36 +92,67 @@ except ImportError:
 # Orchestrator
 # ------------------------------------------------------------------------------
 class Orchestrator:
-    def __init__(self):
+    def __init__(
+        self,
+        data_provider=None,       # DataProvider instance (optional)
+        broker=None,               # Broker instance (optional)
+        market_config=None,        # MarketConfig instance (optional)
+        market_calendar=None,      # MarketCalendar instance (optional)
+    ):
         self.api_key = os.getenv("ALPACA_API_KEY")
         self.secret_key = os.getenv("ALPACA_SECRET_KEY")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.poe_model = resolve_poe_model("GPT-5.4")
-        
+
         if not self.openai_api_key:
             logger.warning("OPENAI_API_KEY not found. Agents might fail.")
-            
-        # Initialize Sub-Agents
-        self.alpha_agent = AlphaSignalAgent(name="AlphaCore", model=self.poe_model)
-        self.risk_agent = RiskSignalAgent(name="RiskCore", model=self.poe_model)
-        self.portfolio_agent = PortfolioAgent(name="PortfolioCore", model=self.poe_model)
-        
-        self.execution_agent = ExecutionAgent(
-            alpaca_api_key=self.api_key, 
-            alpaca_secret_key=self.secret_key, 
-            paper=True
-        )
-        self.backtest_agent = BacktestAgent()
-        
+
+        # ── Market abstractions ────────────────────────────────
+        if _NEW_ABSTRACTIONS:
+            self.market_config = market_config or US_MARKET
+            if market_calendar is not None:
+                self.calendar = market_calendar
+            else:
+                self.calendar = USMarketCalendar()
+            self.data_provider = data_provider
+            self.broker = broker
+            logger.info("Orchestrator using %s market (DataProvider=%s, Broker=%s)",
+                        self.market_config.code,
+                        type(self.data_provider).__name__ if self.data_provider else "legacy",
+                        type(self.broker).__name__ if self.broker else "legacy")
+        else:
+            self.market_config = None
+            self.calendar = None
+            self.data_provider = None
+            self.broker = None
+
+        # ── Legacy data client (used when no DataProvider is injected) ──
         # Data Client
         if StockHistoricalDataClient and self.api_key:
             self.data_client = StockHistoricalDataClient(self.api_key, self.secret_key)
         else:
             self.data_client = None
-            
+
+        # ── Execution agent (always created — can use broker when available) ──
+        self.execution_agent = ExecutionAgent(
+            alpaca_api_key=self.api_key,
+            alpaca_secret_key=self.secret_key,
+            paper=True
+        )
+        # If broker is available, inject it into the execution agent
+        if self.broker is not None:
+            self.execution_agent._injected_broker = self.broker
+            self.execution_agent._injected_calendar = self.calendar
+
+        # ── Sub-Agents ─────────────────────────────────────────
+        self.alpha_agent = AlphaSignalAgent(name="AlphaCore", model=self.poe_model)
+        self.risk_agent = RiskSignalAgent(name="RiskCore", model=self.poe_model)
+        self.portfolio_agent = PortfolioAgent(name="PortfolioCore", model=self.poe_model)
+        self.backtest_agent = BacktestAgent()
+
         # Pipeline Context (Shared Memory)
         self.pipeline_context = {}
-        
+
         # Initialize Manager with Agent-as-Tool pattern
         self._initialize_manager_agent()
 
@@ -234,12 +282,22 @@ class Orchestrator:
         )
 
     def fetch_data(self, symbols: Union[str, List[str]], start_date: datetime, end_date: datetime) -> pd.DataFrame:
-        """Fetch historical data from Alpaca or Mock"""
+        """Fetch historical data — delegates to DataProvider if available, else Alpaca/Mock."""
         if isinstance(symbols, str):
             symbols = [symbols]
-            
-        logger.info(f"Fetching data for {symbols} from {start_date} to {end_date}")
-        
+
+        logger.info(f"Fetching data for {symbols} from {start_date.date()} to {end_date.date()}")
+
+        # ── Use DataProvider when available ──
+        if self.data_provider is not None:
+            try:
+                df = self.data_provider.get_historical_bars(symbols, start_date, end_date)
+                if not df.empty:
+                    return df
+            except Exception as e:
+                logger.warning("DataProvider.get_historical_bars failed: %s — falling back to legacy", e)
+
+        # ── Legacy path (Alpaca → yfinance → mock) ──
         if self.data_client:
             try:
                 request_params = StockBarsRequest(
@@ -356,6 +414,14 @@ class Orchestrator:
         if len(symbols) <= top_n:
             return symbols
 
+        # ── Delegate to data provider when available ──
+        if self.data_provider is not None and hasattr(self.data_provider, 'quick_screen'):
+            try:
+                return self.data_provider.quick_screen(symbols, top_n=top_n)
+            except Exception as e:
+                logger.warning("DataProvider.quick_screen failed: %s", e)
+
+        # ── Legacy path ──
         if not self.data_client:
             logger.info("No Alpaca data client — using first %d symbols", top_n)
             return symbols[:top_n]
@@ -415,9 +481,17 @@ class Orchestrator:
 
     def fetch_realtime_prices(self, symbols: List[str]) -> Dict[str, float]:
         """
-        Fetch real-time prices from Alpaca for order sizing.
+        Fetch real-time prices — delegates to DataProvider if available.
         Uses batched snapshot requests for efficiency with large symbol lists.
         """
+        # ── Use DataProvider when available ──
+        if self.data_provider is not None:
+            try:
+                return self.data_provider.get_realtime_prices(symbols)
+            except Exception as e:
+                logger.warning("DataProvider.get_realtime_prices failed: %s — falling back to legacy", e)
+
+        # ── Legacy path ──
         prices: Dict[str, float] = {}
 
         # 1. Try Alpaca snapshots (batched, efficient for many symbols)
@@ -459,16 +533,19 @@ class Orchestrator:
         symbols = [symbol] if isinstance(symbol, str) else symbol
         symbol_str = ", ".join(symbols)
         
-        logger.info(f"Running pipeline for {symbol_str} from {start_date} to {end_date}")
-        
+        logger.info(f"Running pipeline for {len(symbols)} symbols from {start_date} to {end_date}")
+
         # 1. Data Fetching
         try:
             start_dt = datetime.strptime(start_date, "%Y-%m-%d")
             end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-            
+
             # ROLLING WINDOW: Fetch 1 year prior for training to avoid leakage
             lookback_days = 365
             fetch_start_dt = start_dt - timedelta(days=lookback_days)
+
+            if len(symbols) > 50:
+                print(f"\n  📊 Fetching data for {len(symbols)} symbols...")
             logger.info(f"Fetching extended data from {fetch_start_dt.date()} to {end_dt.date()} for Rolling Training...")
             
             full_data = self.fetch_data(symbols, fetch_start_dt, end_dt)
@@ -563,6 +640,9 @@ class Orchestrator:
             backtest_result["signals"] = symbol_scores
             backtest_result["target_weights"] = portfolio_result.get("target_weights", {})
             backtest_result["risk_level"] = risk_result.get("overall_risk_level", "UNKNOWN")
+            backtest_result["risk_score"] = risk_result.get("risk_score", 0.0)
+            backtest_result["market_regime"] = risk_result.get("market_regime", "unknown")
+            backtest_result["risk_narrative"] = risk_result.get("risk_narrative", "")
             backtest_result["exit_candidates"] = portfolio_result.get("exit_candidates", [])
 
             return backtest_result
@@ -668,7 +748,7 @@ class Orchestrator:
 
             # Filter market_data to start_date -> end_date
             backtest_market_data = full_data[full_data['date'] >= start_dt].copy()
-            
+
             backtest_result = self.backtest_agent.run_simple_backtest_paper_interface(
                 predictions=full_signals_series,
                 start_time=start_date,
@@ -678,6 +758,16 @@ class Orchestrator:
                 market_data=backtest_market_data,
                 plot_results=False
             )
+
+            # Risk assessment on the full test period for reporting
+            try:
+                risk_result = self.risk_agent.generate_risk_signals_from_data(backtest_market_data, enable_llm=False)
+                backtest_result["risk_level"] = risk_result.get("overall_risk_level", "UNKNOWN")
+                backtest_result["risk_score"] = risk_result.get("risk_score", 0.0)
+                backtest_result["market_regime"] = risk_result.get("market_regime", "unknown")
+            except Exception as e:
+                logger.warning("Rolling pipeline risk assessment failed: %s", e)
+                backtest_result["risk_level"] = "UNKNOWN"
 
             # Attach the last week's signals for execution
             if all_signals_list:
@@ -691,6 +781,46 @@ class Orchestrator:
             import traceback
             traceback.print_exc()
             return {"status": "error", "message": str(e)}
+
+    # ══════════════════════════════════════════════════════════════════════
+    # Order Execution Helpers
+    # ══════════════════════════════════════════════════════════════════════
+
+    def _execute_via_broker(self, orders: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Execute orders directly via the injected broker (bypasses legacy execution agent)."""
+        results = []
+        # Sort: sells first (T+1: free up locked shares before buying)
+        sells = [o for o in orders if o["side"] == "sell"]
+        buys = [o for o in orders if o["side"] == "buy"]
+
+        for order in sells + buys:
+            try:
+                result = self.broker.place_order(
+                    symbol=order["symbol"],
+                    qty=order["qty"],
+                    side=order["side"],
+                    order_type=order.get("order_type", "market"),
+                    limit_price=order.get("limit_price"),
+                )
+                results.append({
+                    "symbol": result.symbol,
+                    "status": result.status,
+                    "qty": result.qty,
+                    "side": result.side,
+                    "filled_price": result.filled_price,
+                    "error": result.error or "",
+                })
+            except Exception as e:
+                logger.error("Broker order failed for %s: %s", order.get("symbol"), e)
+                results.append({
+                    "symbol": order.get("symbol", "?"),
+                    "status": "failed",
+                    "qty": order.get("qty", 0),
+                    "side": order.get("side", "?"),
+                    "error": str(e),
+                })
+
+        return results
 
     # ══════════════════════════════════════════════════════════════════════
     # Live Trading
@@ -713,11 +843,18 @@ class Orchestrator:
         cycle_id = getattr(journal, '_cycle_id', 0) + 1 if journal else 0
         logger.info("=== Live Trading Cycle #%d ===", cycle_id)
 
-        market_status = market_status_str()
+        # ── Market status (use injected calendar or legacy) ──
+        if self.calendar is not None:
+            market_status = self.calendar.status_str()
+            market_open = self.calendar.is_open()
+        else:
+            market_status = _legacy_market_status_str()
+            market_open = _legacy_is_market_open()
+
         if journal:
             journal.start_cycle(cycle_id, market_status)
 
-        if not is_market_open():
+        if not market_open:
             logger.info("Market %s - skipping execution.", market_status)
             if journal:
                 journal.finish_cycle()
@@ -730,19 +867,25 @@ class Orchestrator:
             logger.info("Live cycle: %d candidates after pre-screen (from %d total)",
                         len(candidates), len(symbols))
 
-            # 1. Fetch latest market data for candidates + currently held positions
-            if alpaca_service:
-                held_symbols = []
+            # ── Get positions from injected broker or legacy Alpaca ──
+            held_symbols = []
+            if self.broker is not None:
                 try:
-                    for p in alpaca_service.get_positions():
+                    for p in self.broker.get_positions():
+                        s = p.symbol if hasattr(p, 'symbol') else p.get('symbol', '')
+                        if s and s not in candidates:
+                            held_symbols.append(s)
+                except Exception as e:
+                    logger.warning("Broker.get_positions failed: %s", e)
+            elif _legacy_alpaca_service:
+                try:
+                    for p in _legacy_alpaca_service.get_positions():
                         s = getattr(p, "symbol", "")
                         if s and s not in candidates:
                             held_symbols.append(s)
                 except Exception:
                     pass
-                fetch_symbols = list(dict.fromkeys(candidates + held_symbols))  # dedupe, preserve order
-            else:
-                fetch_symbols = candidates
+            fetch_symbols = list(dict.fromkeys(candidates + held_symbols))  # dedupe, preserve order
 
             end_dt = datetime.now()
             start_dt = end_dt - timedelta(days=90)
@@ -801,11 +944,21 @@ class Orchestrator:
             if journal:
                 journal.log_signals(symbol_scores, risk_level)
 
-            # 6. Get current positions from Alpaca
+            # 6. Get current positions from broker (injected or legacy)
             current_positions: Dict[str, float] = {}
-            if alpaca_service:
+            if self.broker is not None:
                 try:
-                    for p in alpaca_service.get_positions():
+                    for p in self.broker.get_positions():
+                        sym = p.symbol if hasattr(p, 'symbol') else p.get('symbol', '')
+                        mv = p.market_value if hasattr(p, 'market_value') else p.get('market_value', 0)
+                        if sym:
+                            current_positions[sym] = float(mv)
+                    logger.info("Current positions: %d held", len(current_positions))
+                except Exception as e:
+                    logger.warning("Failed to get broker positions: %s", e)
+            elif _legacy_alpaca_service:
+                try:
+                    for p in _legacy_alpaca_service.get_positions():
                         sym = getattr(p, "symbol", "")
                         if sym:
                             current_positions[sym] = float(getattr(p, "market_value", 0))
@@ -817,13 +970,31 @@ class Orchestrator:
             all_active = list(set(list(target_weights.keys()) + list(current_positions.keys())))
             market_prices = self.fetch_realtime_prices(all_active) if all_active else {}
 
+            # 7.5 Update broker with latest market prices (for price limit checks)
+            if self.broker is not None and hasattr(self.broker, 'update_market_prices'):
+                try:
+                    self.broker.update_market_prices(market_prices)
+                except Exception:
+                    pass
+
             # 8. Generate orders from weight diffs
-            orders = generate_orders(
-                target_weights=target_weights,
-                current_positions=current_positions,
-                total_capital=total_capital,
-                market_prices=market_prices,
-            )
+            # Use CN order generation (lot sizing) when in A-share mode
+            if self.market_config and self.market_config.code == "cn":
+                from agent_pools.portfolio_agent_demo.portfolio_agent import generate_orders_cn
+                orders = generate_orders_cn(
+                    target_weights=target_weights,
+                    current_positions=current_positions,
+                    total_capital=total_capital,
+                    market_prices=market_prices,
+                    lot_size=self.market_config.lot_size,
+                )
+            else:
+                orders = generate_orders(
+                    target_weights=target_weights,
+                    current_positions=current_positions,
+                    total_capital=total_capital,
+                    market_prices=market_prices,
+                )
 
             decisions = [
                 {"symbol": o["symbol"], "action": o["side"].upper(), "qty": o["qty"],
@@ -833,10 +1004,15 @@ class Orchestrator:
             if journal:
                 journal.log_decisions(decisions)
 
-            # 9. Execute orders
+            # 9. Execute orders — use injected broker when available, else legacy
             execution_results: List[Dict[str, Any]] = []
             if orders:
-                execution_results = self.execution_agent.execute_orders_direct(orders)
+                if self.broker is not None:
+                    # ── Use injected broker directly ──
+                    execution_results = self._execute_via_broker(orders)
+                else:
+                    # ── Legacy execution agent path ──
+                    execution_results = self.execution_agent.execute_orders_direct(orders)
                 logger.info("Executed %d orders: %s", len(execution_results),
                             [(r.get("symbol"), r.get("status")) for r in execution_results])
 
@@ -885,13 +1061,16 @@ class Orchestrator:
         symbol_display = ", ".join(symbols) if len(symbols) <= 15 else \
             f"{', '.join(symbols[:10])} ... (+{len(symbols) - 10} more)"
 
+        currency_sym = self.market_config.currency_symbol if self.market_config else "$"
+
         print("\n" + "=" * 60)
         print("  LIANGHUA Auto Trading System - LIVE PAPER")
         print("=" * 60)
+        print(f"  Market:      {self.market_config.market_name if self.market_config else 'US'}")
         print(f"  Universe:    {len(symbols)} stocks")
         print(f"                {symbol_display}")
         print(f"  Interval:    {interval_seconds}s")
-        print(f"  Capital:     ${total_capital:,.0f}")
+        print(f"  Capital:     {currency_sym}{total_capital:,.0f}")
         print(f"  MaxPositions: {max_positions}")
         print("=" * 60)
         print("  Press Ctrl+C to stop.\n")
@@ -899,19 +1078,41 @@ class Orchestrator:
         try:
             while True:
                 cycle += 1
-                ms = market_status_str()
+                # ── Market status ──
+                if self.calendar is not None:
+                    ms = self.calendar.status_str()
+                else:
+                    ms = _legacy_market_status_str()
 
-                # Status panel
+                # ── Status panel ──
                 print(f"\n{'='*50}")
                 print(f"  Cycle #{cycle}  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 print(f"  Market: {ms}")
-                if alpaca_service:
+
+                # ── Account info from broker or legacy ──
+                if self.broker is not None:
                     try:
-                        acct = alpaca_service.get_account()
+                        acct = self.broker.get_account()
+                        pv = acct.portfolio_value if hasattr(acct, 'portfolio_value') else float(getattr(acct, 'portfolio_value', 0))
+                        cash = acct.cash if hasattr(acct, 'cash') else float(getattr(acct, 'cash', 0))
+                        print(f"  Portfolio: {currency_sym}{pv:,.0f}  |  Cash: {currency_sym}{cash:,.0f}")
+                        positions = self.broker.get_positions()
+                        if positions:
+                            print(f"  Positions: {len(positions)}")
+                            for p in positions[:10]:
+                                sym = p.symbol if hasattr(p, 'symbol') else p.get('symbol', '?')
+                                qty = p.qty if hasattr(p, 'qty') else p.get('qty', 0)
+                                mv = p.market_value if hasattr(p, 'market_value') else p.get('market_value', 0)
+                                print(f"    {sym:<6} {float(qty):>8.1f} sh  {currency_sym}{float(mv):>10,.0f}")
+                    except Exception as e:
+                        logger.warning("Account display error: %s", e)
+                elif _legacy_alpaca_service:
+                    try:
+                        acct = _legacy_alpaca_service.get_account()
                         pv = float(acct.portfolio_value) if hasattr(acct, 'portfolio_value') else 0
                         cash = float(acct.cash) if hasattr(acct, 'cash') else 0
                         print(f"  Portfolio: ${pv:,.0f}  |  Cash: ${cash:,.0f}")
-                        positions = alpaca_service.get_positions()
+                        positions = _legacy_alpaca_service.get_positions()
                         if positions:
                             print(f"  Positions: {len(positions)}")
                             for p in positions[:10]:

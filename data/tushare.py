@@ -1,1 +1,0 @@
-raise ImportError("Local file 'data/tushare.py' shadows the installed 'tushare' package. Please remove or rename this file. Backup: tushare.py.bak")

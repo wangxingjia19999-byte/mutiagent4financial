@@ -46,7 +46,15 @@ def _construct_portfolio_impl(
     total_capital: float = 100000.0,
     max_positions: int = 20,
 ) -> Dict[str, Any]:
-    """Build target portfolio weights from alpha signals, adjusted for risk level."""
+    """
+    Build target portfolio weights from alpha signals, risk-adjusted per stock.
+
+    Weighting logic:
+      1. Global capital allocation: scaled by overall_risk_level (LOW=100%, MODERATE=80%, HIGH=50%)
+      2. Per-stock risk adjustment: safer stocks get larger weights (risk-parity inspired)
+      3. Per-stock position caps: enforced from risk agent's per-stock assessment
+      4. Fallback: equal-weight if no per-stock risk data available
+    """
     try:
         # 1. Parse alpha signals
         if isinstance(alpha_signals, dict):
@@ -56,10 +64,15 @@ def _construct_portfolio_impl(
         else:
             raw_signals = {}
 
-        # 2. Determine risk level and capital allocation
+        # 2. Determine global risk level and capital allocation
         risk_level = "LOW"
+        per_stock_risk: Dict[str, Dict[str, Any]] = {}
+        risk_score_global = 0.0
+
         if isinstance(risk_signals, dict):
             risk_level = risk_signals.get("overall_risk_level", "LOW")
+            risk_score_global = risk_signals.get("risk_score", 0.0)
+            per_stock_risk = risk_signals.get("per_stock_risk", {})
 
         capital_allocation = {"LOW": 1.0, "MODERATE": 0.80, "HIGH": 0.50}
         alloc_pct = capital_allocation.get(risk_level, 0.80)
@@ -69,28 +82,102 @@ def _construct_portfolio_impl(
         positive = {s: v for s, v in raw_signals.items() if v > 0}
         negative = {s: v for s, v in raw_signals.items() if v <= 0}
 
-        # 4. Equal-risk-weighted allocation for positive signals
         target_weights: Dict[str, float] = {}
         exit_candidates: List[str] = list(negative.keys())
+        weight_method = "equal_weight"  # default
 
         if positive:
-            # Rank by score, take top max_positions
+            # Rank by alpha score, take top max_positions
             ranked = sorted(positive.items(), key=lambda x: x[1], reverse=True)
             selected = ranked[:max_positions]
 
             if selected:
-                # Equal weight among selected (diversified), scaled by risk allocation
-                weight_per_position = alloc_pct / len(selected)
-                for symbol, score in selected:
-                    target_weights[symbol] = weight_per_position
+                # ── Risk-adjusted weighting ──
+                risk_factors: Dict[str, float] = {}
+
+                for symbol, alpha_score in selected:
+                    stock_risk = per_stock_risk.get(symbol, {})
+                    stock_risk_score = stock_risk.get("risk_score")
+
+                    if stock_risk_score is not None:
+                        # Inverse risk weighting: safer stocks get higher weights
+                        # risk_score 0.0 → factor 1.0, risk_score 0.5 → factor ~0.55, risk_score 1.0 → factor ~0.33
+                        risk_factor = 1.0 / (1.0 + 2.0 * stock_risk_score)
+                        # Blend with alpha signal strength
+                        alpha_norm = (alpha_score - min(s for _, s in selected)) / (
+                            max(s for _, s in selected) - min(s for _, s in selected) + 1e-8
+                        )
+                        risk_factors[symbol] = risk_factor * (0.5 + 0.5 * alpha_norm)
+                    else:
+                        # No per-stock risk data — use neutral factor
+                        risk_factors[symbol] = 1.0
+
+                # Normalize risk factors to sum to alloc_pct
+                total_factor = sum(risk_factors.values())
+                if total_factor > 0:
+                    weight_method = "risk_adjusted"
+                    for symbol in risk_factors:
+                        raw_weight = (risk_factors[symbol] / total_factor) * alloc_pct
+
+                        # Apply per-stock position cap from risk agent (soft cap)
+                        cap = per_stock_risk.get(symbol, {}).get("position_cap", 0.15)
+                        target_weights[symbol] = round(raw_weight, 6)
+
+                    # Re-normalize: if total < alloc_pct because caps constrained us,
+                    # scale all weights proportionally until we hit alloc_pct or caps.
+                    MAX_PASSES = 3
+                    for _ in range(MAX_PASSES):
+                        capped_sum = sum(target_weights.values())
+                        if capped_sum >= alloc_pct * 0.99:  # within 1%, good enough
+                            break
+                        # Find stocks with headroom below their cap
+                        remaining = alloc_pct - capped_sum
+                        candidates = {
+                            s: w for s, w in target_weights.items()
+                            if w < per_stock_risk.get(s, {}).get("position_cap", 0.15) * 0.99
+                        }
+                        if not candidates:
+                            # All stocks at cap — scale caps up by 25% and retry
+                            for s in target_weights:
+                                old_cap = per_stock_risk.get(s, {}).get("position_cap", 0.15)
+                                per_stock_risk[s]["position_cap"] = round(old_cap * 1.25, 4)
+                            # Re-apply caps with new limits
+                            for s in target_weights:
+                                new_cap = per_stock_risk[s].get("position_cap", 0.15)
+                                target_weights[s] = min(target_weights[s], new_cap)
+                            continue
+                        # Distribute remaining proportionally to candidates
+                        candidate_sum = sum(candidates.values())
+                        for s in candidates:
+                            extra = (candidates[s] / candidate_sum) * remaining
+                            cap = per_stock_risk.get(s, {}).get("position_cap", 0.15)
+                            target_weights[s] = round(min(target_weights[s] + extra, cap), 6)
+
+                    # Final: if still under-allocated, just scale everything up proportionally
+                    final_sum = sum(target_weights.values())
+                    if final_sum > 0 and final_sum < alloc_pct:
+                        scale = alloc_pct / final_sum
+                        for s in target_weights:
+                            target_weights[s] = round(target_weights[s] * scale, 6)
+
+                # If risk-adjusted weighting produced nothing, fall back to equal-weight
+                if not target_weights:
+                    weight_method = "equal_weight"
+                    weight_per_position = alloc_pct / len(selected)
+                    for symbol, _ in selected:
+                        # Still apply position caps if available
+                        cap = per_stock_risk.get(symbol, {}).get("position_cap", weight_per_position * 2)
+                        target_weights[symbol] = min(weight_per_position, cap)
 
         return {
             "status": "success",
             "target_weights": target_weights,
             "risk_adjustment": {
                 "risk_level": risk_level,
+                "risk_score": risk_score_global,
                 "capital_allocation": alloc_pct,
                 "investable_capital": investable_capital,
+                "weight_method": weight_method,
             },
             "exit_candidates": exit_candidates,
             "selected_assets": list(target_weights.keys()),
@@ -163,6 +250,72 @@ def generate_orders(
             })
 
     # Sells first (raise cash), then buys
+    sells = [o for o in orders if o["side"] == "sell"]
+    buys = [o for o in orders if o["side"] == "buy"]
+    return sells + buys
+
+
+def generate_orders_cn(
+    target_weights: Dict[str, float],
+    current_positions: Dict[str, float],
+    total_capital: float,
+    market_prices: Dict[str, float],
+    lot_size: int = 100,
+    min_trade_value: float = 10_000.0,
+) -> List[Dict[str, Any]]:
+    """
+    Compute orders for A-share market with round-lot sizing.
+
+    Same logic as generate_orders(), but:
+        - qty is rounded down to nearest lot (100 shares)
+        - minimum trade value is in CNY (default ¥10,000)
+        - reason text uses ¥ instead of $
+    """
+    orders: List[Dict[str, Any]] = []
+
+    all_symbols = set(list(target_weights.keys()) + list(current_positions.keys()))
+
+    for symbol in all_symbols:
+        target_weight = target_weights.get(symbol, 0.0)
+        current_value = current_positions.get(symbol, 0.0)
+        target_value = target_weight * total_capital
+        diff = target_value - current_value
+
+        if abs(diff) < min_trade_value:
+            continue
+
+        price = market_prices.get(symbol, 0)
+        if price <= 0:
+            continue
+
+        # Round down to nearest lot
+        raw_qty = int(abs(diff) / price)
+        qty = (raw_qty // lot_size) * lot_size
+        if qty < lot_size:
+            continue
+
+        if diff > 0:
+            orders.append({
+                "symbol": symbol,
+                "side": "buy",
+                "qty": qty,
+                "order_type": "limit",
+                "limit_price": round(price * 1.005, 2),
+                "estimated_value": qty * price,
+                "reason": f"target_weight={target_weight:.3f}, current_value=¥{current_value:,.0f}, diff=+¥{diff:,.0f}",
+            })
+        else:
+            orders.append({
+                "symbol": symbol,
+                "side": "sell",
+                "qty": qty,
+                "order_type": "limit",
+                "limit_price": round(price * 0.995, 2),
+                "estimated_value": qty * price,
+                "reason": f"target_weight={target_weight:.3f}, current_value=¥{current_value:,.0f}, diff=¥{diff:,.0f}",
+            })
+
+    # Sells first (raise cash for T+1), then buys
     sells = [o for o in orders if o["side"] == "sell"]
     buys = [o for o in orders if o["side"] == "buy"]
     return sells + buys

@@ -41,6 +41,12 @@ from agent_pools.execution_agent_demo.execution_agent_demo.execution_agent impor
     alpaca_service,
 )
 
+# Market abstractions (A-share support)
+from market import MarketConfig, US_MARKET, CN_MARKET, USMarketCalendar, CNMarketCalendar
+from data.providers.alpaca_provider import AlpacaProvider
+from data.providers.tushare_provider import TushareProvider
+from broker import AlpacaBroker, CNPaperBroker
+
 # Ensure project root is on path for imports
 _project_root = Path(__file__).resolve().parent
 if str(_project_root) not in sys.path:
@@ -229,40 +235,122 @@ def _store_pipeline_reflections(mode: str, result: dict, symbols_count: int):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def resolve_symbols(args) -> list:
-    """Resolve the symbol list from --universe or --symbol."""
+    """Resolve the symbol list from --universe or --symbol.
+
+    For large CN universes (all_cn, liquid_cn), automatically runs
+    multi-factor pre-screening to narrow down to a manageable subset.
+    """
     if args.universe:
         from agent_pools.market_universe import get_market_universe_cached
 
-        print(f"\n  Fetching market universe: {args.universe} ...")
+        # Detect market from universe choice
+        cn_scopes = {"csi300", "csi500", "liquid_cn", "all_cn"}
+        market = "cn" if args.universe in cn_scopes else args.market
+
+        print(f"\n  Fetching market universe: {args.universe} (market={market}) ...")
+
+        # For full-market CN universes, use multi-factor pre-screening
+        if args.universe in ("all_cn", "liquid_cn") and not args.no_filter:
+            print("  🧠 Running multi-factor pre-screener (5000+ → 200 candidates)...")
+            try:
+                from data.providers.full_market_screener import FullMarketScreener
+                screener = FullMarketScreener()
+                symbols = screener.screen(
+                    top_n=getattr(args, 'max_universe', 200),
+                    fetch_historical=True,
+                )
+                if symbols and len(symbols) >= 50:
+                    print(f"  ✅ Pre-screened to {len(symbols)} high-quality candidates")
+                    print(f"     Top 10: {', '.join(symbols[:10])}")
+                    return symbols
+                print("  ⚠️  Pre-screener returned insufficient results — falling back to cache")
+            except Exception as e:
+                print(f"  ⚠️  Pre-screener failed ({e}) — falling back to cache")
+
         symbols = get_market_universe_cached(
             scope=args.universe,
             apply_filters=not args.no_filter,
+            market=market,
         )
         if not symbols:
-            print("  ERROR: No symbols returned from Alpaca. Check API keys or try --symbol.")
+            source = "Tushare" if market == "cn" else "Alpaca"
+            print(f"  ERROR: No symbols returned from {source}. Check API keys or try --symbol.")
             sys.exit(1)
+
+        # If still too many symbols, apply hard cap and warn
+        max_universe = getattr(args, 'max_universe', 500)
+        if len(symbols) > max_universe:
+            print(f"  ⚠️  Truncating {len(symbols)} -> {max_universe} symbols (use --max-universe to adjust)")
+            # Take evenly-spaced sample to maintain diversification
+            step = len(symbols) // max_universe
+            symbols = symbols[::step][:max_universe] if step > 1 else symbols[:max_universe]
+
         print(f"  Loaded {len(symbols)} symbols (e.g. {', '.join(symbols[:10])}...)")
         return symbols
 
     return [s.strip() for s in args.symbol.split(",")]
 
 
+def _create_market_components(market: str, capital: float, broker_type: str = "paper"):
+    """Factory: returns (MarketConfig, DataProvider, Broker, MarketCalendar) for the given market.
+
+    broker_type:
+        - "paper" (default): CNPaperBroker or AlpacaBroker (simulation)
+        - "emt": EMTBroker with EMQProvider (real A-share API via 东方财富)
+        - "alpaca": AlpacaBroker (real US trading)
+    """
+    if market == "cn":
+        config = CN_MARKET
+        calendar = CNMarketCalendar()
+
+        if broker_type == "emt":
+            # Use real EMT/EMQ API endpoints
+            from data.providers.emq_provider import EMQProvider
+            from broker.emt_broker import EMTBroker
+
+            provider = EMQProvider()
+            broker = EMTBroker(
+                initial_capital=capital,
+                config=config,
+            )
+            # Wire up EMT broker with EMQ data for price discovery
+            broker._paper._data_provider = provider
+            return config, provider, broker, calendar
+        else:
+            # Paper simulation (default)
+            provider = TushareProvider()
+            broker = CNPaperBroker(
+                initial_capital=capital, config=config, data_provider=provider
+            )
+            return config, provider, broker, calendar
+    else:
+        config = US_MARKET
+        provider = AlpacaProvider()
+        calendar = USMarketCalendar()
+        broker = AlpacaBroker(paper=True, config=config)
+        return config, provider, broker, calendar
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Display Helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def print_banner(args, symbols, rag_enabled, memory_enabled):
+def print_banner(args, symbols, rag_enabled, memory_enabled, market_config=None):
     """Print the system startup banner with RAG & Memory status."""
+    currency_sym = market_config.currency_symbol if market_config else "$"
+    market_name = market_config.market_name if market_config else "US Stocks"
+
     print("=" * 55)
     print("  LIANGHUA Paper Trading System")
     print("=" * 55)
+    print(f"  Market:       {market_name}")
     print(f"  Mode:         {args.mode.upper()}")
     print(f"  Symbols:      {len(symbols)} stocks")
     if len(symbols) <= 20:
         print(f"                {', '.join(symbols)}")
     else:
         print(f"                {', '.join(symbols[:10])} ... (+{len(symbols) - 10} more)")
-    print(f"  Capital:      ${args.capital:,.0f}")
+    print(f"  Capital:      {currency_sym}{args.capital:,.0f}")
     if args.mode == "backtest":
         print(f"  Period:       {args.start} -> {args.end}")
         if args.rolling:
@@ -302,7 +390,18 @@ def print_backtest_result(result):
             print(f"    ... and {len(tw) - 15} more")
 
     rl = result.get("risk_level", "?")
-    print(f"\n  Risk Level: {rl}")
+    rs = result.get("risk_score", None)
+    regime = result.get("market_regime", "")
+    print(f"\n  Risk Level: {rl}", end="")
+    if rs is not None:
+        print(f" (score={rs:.3f})", end="")
+    if regime:
+        print(f"  |  Regime: {regime}", end="")
+    print()
+
+    narrative = result.get("risk_narrative", "")
+    if narrative:
+        print(f"  📋 {narrative}")
 
     ec = result.get("exit_candidates", [])
     if ec:
@@ -320,7 +419,7 @@ def print_once_result(result):
     print(f"  Cycle:    #{result.get('cycle_id', '?')}")
     print(f"  Status:   {result.get('status')}")
     print(f"  Market:   {result.get('market_status', '?')}")
-    print(f"  Risk:     {result.get('risk_level', '?')}")
+    print(f"  Risk:     {result.get('risk_level', '?')} (score={result.get('risk_score', 0):.3f})")
 
     tw = result.get("target_weights", {})
     if tw:
@@ -357,8 +456,45 @@ def print_once_result(result):
     print("-" * 40)
 
 
-def show_account():
-    """Show current Alpaca account status."""
+def show_account(broker=None, calendar=None, market_config=None):
+    """Show current account status (uses injected broker or legacy Alpaca)."""
+    currency_sym = market_config.currency_symbol if market_config else "$"
+    market_name = market_config.market_name if market_config else "US Stocks"
+
+    # ── Use injected broker when available ──
+    if broker is not None:
+        try:
+            acct = broker.get_account()
+            ms = calendar.status_str() if calendar else "?"
+
+            print("\n" + "=" * 50)
+            print(f"  {market_name.upper()} ACCOUNT")
+            print("=" * 50)
+            print(f"  Buying Power:  {currency_sym}{acct.buying_power:,.0f}")
+            print(f"  Cash:          {currency_sym}{acct.cash:,.0f}")
+            print(f"  Portfolio:     {currency_sym}{acct.portfolio_value:,.0f}")
+            print(f"  Currency:      {acct.currency}")
+            print(f"  Market:        {ms}")
+
+            positions = broker.get_positions()
+            if positions:
+                print(f"\n  Positions ({len(positions)}):")
+                for p in positions[:20]:
+                    sym = p.symbol if hasattr(p, 'symbol') else p.get('symbol', '?')
+                    qty = p.qty if hasattr(p, 'qty') else p.get('qty', 0)
+                    mv = p.market_value if hasattr(p, 'market_value') else p.get('market_value', 0)
+                    price = p.current_price if hasattr(p, 'current_price') else p.get('current_price', 0)
+                    print(f"    {sym:<10} {float(qty):>8.0f} sh  @ {currency_sym}{float(price):.2f}  = {currency_sym}{float(mv):>10,.0f}")
+                if len(positions) > 20:
+                    print(f"    ... and {len(positions) - 20} more")
+            else:
+                print("\n  No open positions.")
+            print("=" * 50)
+            return
+        except Exception as e:
+            print(f"  Broker account fetch failed: {e}")
+
+    # ── Legacy Alpaca fallback ──
     if not alpaca_service:
         print("  Alpaca service not available.")
         return
@@ -420,8 +556,17 @@ def main():
     # Universe vs explicit symbols
     parser.add_argument(
         "--universe", type=str, default=None,
-        choices=["nasdaq100", "sp500", "liquid", "all"],
-        help="Auto-fetch tradeable stocks from Alpaca. Overrides --symbol.",
+        choices=["nasdaq100", "sp500", "liquid", "all",
+                 "csi300", "csi500", "liquid_cn", "all_cn"],
+        help="Auto-fetch tradeable stocks. US: nasdaq100/sp500/liquid/all. CN: csi300/csi500/liquid_cn/all_cn.",
+    )
+    parser.add_argument(
+        "--market", type=str, default="us", choices=["us", "cn"],
+        help="Market: us (Alpaca, USD) or cn (A-Share, CNY).",
+    )
+    parser.add_argument(
+        "--broker", type=str, default="paper", choices=["paper", "emt", "alpaca"],
+        help="Broker: paper (simulation) | emt (东方财富 EMT real API) | alpaca (Alpaca real trading).",
     )
     parser.add_argument(
         "--symbol", type=str, default="AAPL,MSFT",
@@ -430,6 +575,10 @@ def main():
     parser.add_argument(
         "--no-filter", action="store_true",
         help="Skip price/volume filtering when using --universe.",
+    )
+    parser.add_argument(
+        "--max-universe", type=int, default=200,
+        help="Maximum number of symbols in universe (pre-screened for CN, capped for US).",
     )
 
     parser.add_argument(
@@ -468,10 +617,20 @@ def main():
     args = parser.parse_args()
     symbols = resolve_symbols(args)
 
+    # Auto-detect market from universe choice
+    cn_scopes = {"csi300", "csi500", "liquid_cn", "all_cn"}
+    if args.universe and args.universe in cn_scopes:
+        args.market = "cn"
+
     rag_enabled = not args.no_rag
     memory_enabled = not args.no_memory
 
-    print_banner(args, symbols, rag_enabled, memory_enabled)
+    # ── Market components ──
+    market_config, data_provider, broker, calendar = _create_market_components(
+        args.market, args.capital, broker_type=args.broker
+    )
+
+    print_banner(args, symbols, rag_enabled, memory_enabled, market_config)
 
     # ── Init RAG ──
     rag_summary = ""
@@ -502,14 +661,19 @@ def main():
         else:
             print("  [Memory] Unavailable - continuing without memory.")
 
-    # ── Init Orchestrator ──
+    # ── Init Orchestrator (with injected market components) ──
     print("\n  Initializing orchestrator (Alpha + Risk + Portfolio + Backtest + Execution) ...")
-    orch = Orchestrator()
+    orch = Orchestrator(
+        data_provider=data_provider,
+        broker=broker,
+        market_config=market_config,
+        market_calendar=calendar,
+    )
     print("  Ready.\n")
 
     # Show account for live modes
     if args.mode in ("once", "continuous"):
-        show_account()
+        show_account(broker=broker, calendar=calendar, market_config=market_config)
 
     # ═══════════════════════════════════════════════════════════════
     # Execute
