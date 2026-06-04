@@ -17,9 +17,11 @@ Usage:
 """
 
 import argparse
+import os
 import warnings
 import logging
 import sys
+from datetime import datetime
 from pathlib import Path
 
 warnings.filterwarnings("ignore")
@@ -287,9 +289,154 @@ def resolve_symbols(args) -> list:
             symbols = symbols[::step][:max_universe] if step > 1 else symbols[:max_universe]
 
         print(f"  Loaded {len(symbols)} symbols (e.g. {', '.join(symbols[:10])}...)")
+
+        # ── Market cap filter (small/mid-cap only) ──
+        if getattr(args, 'max_market_cap', None):
+            symbols = _apply_market_cap_filter(symbols, args.max_market_cap, market)
+            if not symbols:
+                print("  ERROR: No symbols passed market cap filter. Try a larger --max-market-cap.")
+                sys.exit(1)
+
         return symbols
 
-    return [s.strip() for s in args.symbol.split(",")]
+    symbols = [s.strip() for s in args.symbol.split(",")]
+
+    # ── Market cap filter (also applies to --symbol lists) ──
+    if getattr(args, 'max_market_cap', None):
+        sym_market = args.market  # use the explicit --market flag
+        symbols = _apply_market_cap_filter(symbols, args.max_market_cap, sym_market)
+        if not symbols:
+            print("  ERROR: No symbols passed market cap filter. Try a larger --max-market-cap.")
+            sys.exit(1)
+
+    return symbols
+
+
+def _apply_market_cap_filter(symbols: List[str], max_cap_yi: float, market: str) -> List[str]:
+    """
+    Filter symbols by market cap ≤ max_cap_yi (亿元).
+
+    For CN: 1亿 = ¥100M. Uses provider's spot/snapshot data.
+    For US: converts 亿元 to USD (roughly ÷7). Uses Alpaca snapshot or yfinance.
+    """
+    max_cap_cny = max_cap_yi * 1e8  # convert 亿 to CNY
+
+    if market == "cn":
+        return _filter_cn_market_cap(symbols, max_cap_cny)
+    else:
+        return _filter_us_market_cap(symbols, max_cap_cny)
+
+
+def _filter_cn_market_cap(symbols: List[str], max_cap_cny: float) -> List[str]:
+    """Filter CN stocks by market cap using akshare → Tushare → keep-all fallback."""
+    max_cap_yi = max_cap_cny / 1e8
+
+    # ── Method 1: akshare (free, has 总市值 in spot data) ──
+    try:
+        import akshare as ak
+        import requests
+        s = requests.Session()
+        s.trust_env = False
+
+        spot = ak.stock_zh_a_spot_em()
+        if spot is not None and not spot.empty:
+            from data.providers.akshare_provider import _normalize_symbol
+            spot['symbol'] = spot['代码'].apply(_normalize_symbol)
+            spot['total_mv'] = pd.to_numeric(spot['总市值'], errors='coerce')
+
+            spot_filtered = spot[
+                (spot['symbol'].isin(symbols)) &
+                (spot['total_mv'] > 0) &
+                (spot['total_mv'] <= max_cap_cny)
+            ]
+            passed = spot_filtered['symbol'].tolist()
+            if passed:
+                excluded = len(symbols) - len(passed)
+                avg_cap = spot_filtered['total_mv'].mean() / 1e8
+                print(f"  📏 Market cap ≤ {max_cap_yi:.0f}亿: {len(passed)} stocks kept "
+                      f"(avg {avg_cap:.0f}亿, excluded {excluded})")
+                return passed
+    except Exception:
+        pass
+
+    # ── Method 2: Tushare daily_basic (one-by-one, free tier doesn't support batch) ──
+    try:
+        import tushare as ts
+        token = os.getenv("TUSHARE_TOKEN", "")
+        if token and not token.startswith("os.getenv"):
+            ts.set_token(token)
+            pro = ts.pro_api()
+            today_str = datetime.now().strftime("%Y%m%d")
+
+            passed = []
+            total_mvs = []
+            for i, sym in enumerate(symbols):
+                try:
+                    df = pro.daily_basic(ts_code=sym, trade_date=today_str, fields="ts_code,total_mv")
+                    if df is not None and not df.empty:
+                        mv_wan = float(df['total_mv'].iloc[0])  # 万元
+                        mv_cny = mv_wan * 1e4  # → 元
+                        if 0 < mv_cny <= max_cap_cny:
+                            passed.append(sym)
+                            total_mvs.append(mv_cny)
+                    if (i + 1) % 50 == 0:
+                        print(f"    ... checked {i + 1}/{len(symbols)}")
+                except Exception:
+                    continue  # skip this stock
+
+            if passed:
+                excluded = len(symbols) - len(passed)
+                avg_cap = (sum(total_mvs) / len(total_mvs)) / 1e8 if total_mvs else 0
+                print(f"  📏 Market cap ≤ {max_cap_yi:.0f}亿 (via Tushare): "
+                      f"{len(passed)} stocks kept (avg {avg_cap:.0f}亿, excluded {excluded})")
+                return passed
+    except Exception:
+        pass
+
+    # ── Fallback: keep all ──
+    print(f"  ⚠️  Market cap filter unavailable — keeping all {len(symbols)} symbols")
+    return symbols
+
+
+def _filter_us_market_cap(symbols: List[str], max_cap_cny: float) -> List[str]:
+    """
+    Filter US stocks by approximate market cap.
+    Uses yfinance to get market cap (free but slow for large universes).
+    Converts CNY cap → USD (roughly 7:1).
+    """
+    max_cap_usd = max_cap_cny / 7.0  # rough CNY→USD
+
+    try:
+        import yfinance as yf
+
+        passed = []
+        batch_size = 50
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i + batch_size]
+            try:
+                tickers = yf.Tickers(" ".join(batch))
+                for sym in batch:
+                    try:
+                        info = tickers.tickers.get(sym, {}).info if hasattr(tickers, 'tickers') else {}
+                        if not info:
+                            t = yf.Ticker(sym)
+                            info = t.info or {}
+                        cap = info.get('marketCap', 0) or 0
+                        if 0 < cap <= max_cap_usd:
+                            passed.append(sym)
+                    except Exception:
+                        passed.append(sym)  # keep if can't determine
+            except Exception:
+                passed.extend(batch)  # keep all on batch failure
+
+        excluded = len(symbols) - len(passed)
+        print(f"  📏 Market cap ≤ ${max_cap_usd/1e9:.1f}B (≈{max_cap_cny/1e8:.0f}亿): "
+              f"{len(passed)} stocks kept (excluded {excluded})")
+        return passed
+
+    except Exception as e:
+        print(f"  ⚠️  US market cap filter failed ({e}) — keeping all {len(symbols)} symbols")
+        return symbols
 
 
 def _create_market_components(market: str, capital: float, broker_type: str = "paper"):
@@ -605,6 +752,11 @@ def main():
     parser.add_argument(
         "--max-positions", type=int, default=20,
         help="Maximum number of positions to hold (default: 20).",
+    )
+    parser.add_argument(
+        "--max-market-cap", type=float, default=None,
+        help="Maximum market cap in 亿元 (e.g. 500 = ¥500亿). Filters to small/mid-cap only. "
+             "For US stocks, converted to USD (1 亿 ≈ $14M).",
     )
     parser.add_argument(
         "--rolling", action="store_true",
