@@ -1,11 +1,12 @@
 from neo4j import GraphDatabase, AsyncGraphDatabase
 import logging
+import os
 import uuid
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-URI = "bolt://localhost:7687"
-AUTH = ("neo4j", "FinOrchestration")
+URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
+AUTH = (os.getenv("NEO4J_USER", "neo4j"), os.getenv("NEO4J_PASSWORD", "finagent123"))
 
 logging.basicConfig(level=logging.INFO)
 
@@ -192,16 +193,20 @@ class TradingGraphMemory:
         return stats
 
     async def retrieve_memory(self, search_query: str, limit: int = 5):
+        # Simple MATCH fallback when fulltext index is not available
         cypher_query = """
-        CALL db.index.fulltext.queryNodes("memory_search_index", $search_query) YIELD node, score
-        RETURN node, score ORDER BY score DESC LIMIT $limit
+        MATCH (m:Memory)
+        WHERE toLower(m.summary) CONTAINS toLower($search_query)
+           OR toLower(m.query) CONTAINS toLower($search_query)
+           OR any(kw IN m.keywords WHERE toLower(kw) CONTAINS toLower($search_query))
+        RETURN m as node, 1.0 as score
+        ORDER BY m.timestamp DESC LIMIT $limit
         """
         params = {"search_query": search_query, "limit": limit}
         processed_results = []
 
         async with self.driver.session() as session:
             try:
-                # Execute the primary search query
                 result = await session.run(cypher_query, params)
                 result_records = [record async for record in result]
 

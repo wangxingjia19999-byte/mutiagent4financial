@@ -7,7 +7,6 @@ without needing the MCP server running.
 """
 
 import os
-import asyncio
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
@@ -21,87 +20,96 @@ NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "finagent123")
 
 
-def _run_async(coro):
-    """Helper to run async code from sync context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            import nest_asyncio
-            nest_asyncio.apply()
-            return loop.run_until_complete(coro)
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        return asyncio.run(coro)
-
-
 class AgentMemoryClient:
     """
     Synchronous memory client for trading agents.
-    Wraps the memory module's TradingGraphMemory for direct Neo4j access.
+    Uses direct synchronous Neo4j driver to avoid async lock issues.
     """
 
     def __init__(self, uri=None, user=None, password=None):
         self.uri = uri or NEO4J_URI
         self.user = user or NEO4J_USER
         self.password = password or NEO4J_PASSWORD
-        self._db = None
+        self._driver = None
 
-    def _get_db(self):
-        if self._db is None:
-            from agent_pools.memory.database import TradingGraphMemory
-            self._db = TradingGraphMemory(self.uri, self.user, self.password)
-        return self._db
+    def _get_driver(self):
+        if self._driver is None:
+            from neo4j import GraphDatabase
+            try:
+                self._driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+                self._driver.verify_connectivity()
+                # Ensure indexes exist
+                with self._driver.session() as s:
+                    s.run("CREATE INDEX memory_agent_id IF NOT EXISTS FOR (m:Memory) ON (m.agent_id)")
+                    s.run("CREATE INDEX memory_timestamp IF NOT EXISTS FOR (m:Memory) ON (m.timestamp)")
+            except Exception as e:
+                print(f"  [Memory] Neo4j connect failed: {e}")
+                self._driver = None
+        return self._driver
 
     def close(self):
-        if self._db:
-            _run_async(self._db.close())
-            self._db = None
+        if self._driver:
+            self._driver.close()
+            self._driver = None
 
-    # ── Reflection API (mirrors old knowledge/neo4j_memory.py) ──────────
+    # ── Reflection API ──────────────────────────────────────────────
 
     def store_reflection(self, agent_name: str, strategy_name: str,
                          issue: str, lesson_learned: str) -> str:
         """Store a learned lesson into Neo4j long-term memory."""
-        db = self._get_db()
-        if not db or not db.driver:
+        driver = self._get_driver()
+        if not driver:
             return "Neo4j is not connected."
 
+        import uuid
+        memory_id = str(uuid.uuid4())
+        timestamp = datetime.now().isoformat()
         summary = f"[{agent_name}] {strategy_name}: {lesson_learned}"
         keywords = [agent_name, strategy_name] + issue.split()
+
         try:
-            result = _run_async(db.store_memory(
-                query=f"Reflection: {issue}",
-                keywords=keywords,
-                summary=summary,
-                agent_id=agent_name,
-                event_type="AGENT_ACTION",
-                log_level="INFO",
-            ))
-            return f"Successfully stored reflection for {strategy_name} by {agent_name}."
+            with driver.session() as session:
+                session.run("""
+                    CREATE (m:Memory {
+                        memory_id: $memory_id, timestamp: $timestamp,
+                        search_query: $search_query, keywords: $keywords, summary: $summary,
+                        agent_id: $agent_id, event_type: $event_type,
+                        log_level: $log_level, lookup_count: 0
+                    })
+                """, parameters={
+                    "memory_id": memory_id, "timestamp": timestamp,
+                    "search_query": f"Reflection: {issue}", "keywords": keywords,
+                    "summary": summary, "agent_id": agent_name,
+                    "event_type": "AGENT_ACTION", "log_level": "INFO",
+                })
+            return f"Stored: {summary[:100]}..."
         except Exception as e:
             return f"Memory store failed: {e}"
 
     def retrieve_lessons_by_issue(self, keyword: str) -> List[str]:
         """Retrieve past lessons matching a keyword."""
-        db = self._get_db()
-        if not db or not db.driver:
-            return ["Neo4j is not connected."]
+        driver = self._get_driver()
+        if not driver:
+            return []
 
         try:
-            results = _run_async(db.retrieve_memory(keyword, limit=5))
-            if not results:
-                return []
-            lessons = []
-            for r in results:
-                mem = r.get('memory', {})
-                meta = mem.get('metadata', {})
-                lessons.append(
-                    f"[{meta.get('timestamp', 'unknown')}] {meta.get('agent_id', 'unknown')} "
-                    f"Summary: '{mem.get('summary', '')}'"
-                )
-            return lessons
+            with driver.session() as session:
+                result = session.run("""
+                    MATCH (m:Memory)
+                    WHERE toLower(m.summary) CONTAINS toLower($kw)
+                       OR any(k IN m.keywords WHERE toLower(k) CONTAINS toLower($kw))
+                    RETURN m.summary as summary, m.timestamp as ts, m.agent_id as agent
+                    ORDER BY m.timestamp DESC LIMIT 5
+                """, parameters={"kw": keyword})
+                records = list(result)
+                if not records:
+                    return []
+                return [
+                    f"[{r['ts'][:10]}] {r['agent']}: {r['summary'][:150]}"
+                    for r in records
+                ]
         except Exception as e:
-            return [f"Memory query failed: {e}"]
+            return [f"Query failed: {e}"]
 
     # ── General memory API ──────────────────────────────────────────────
 
@@ -113,7 +121,7 @@ class AgentMemoryClient:
         db = self._get_db()
         if not db or not db.driver:
             return None
-        return _run_async(db.store_memory(
+        return _run_async(lambda: db.store_memory(
             query=query, keywords=keywords, summary=summary,
             agent_id=agent_id, event_type=event_type, log_level=log_level,
             session_id=session_id, correlation_id=correlation_id,
@@ -124,25 +132,25 @@ class AgentMemoryClient:
         db = self._get_db()
         if not db or not db.driver:
             return []
-        return _run_async(db.retrieve_memory(search_query, limit))
+        return _run_async(lambda: db.retrieve_memory(search_query, limit))
 
     def retrieve_with_expansion(self, search_query: str, limit: int = 10) -> List[Dict]:
         """Retrieve memories with relationship expansion."""
         db = self._get_db()
         if not db or not db.driver:
             return []
-        return _run_async(db.retrieve_memory_with_expansion(search_query, limit))
+        return _run_async(lambda: db.retrieve_memory_with_expansion(search_query, limit))
 
     def filter_memories(self, filters: Dict, limit: int = 100, offset: int = 0) -> List[Dict]:
         """Filter memories by structured criteria."""
         db = self._get_db()
         if not db or not db.driver:
             return []
-        return _run_async(db.filter_memories(filters, limit, offset))
+        return _run_async(lambda: db.filter_memories(filters, limit, offset))
 
     def get_statistics(self) -> Dict:
         """Get memory graph statistics."""
         db = self._get_db()
         if not db or not db.driver:
             return {}
-        return _run_async(db.get_statistics())
+        return _run_async(lambda: db.get_statistics())

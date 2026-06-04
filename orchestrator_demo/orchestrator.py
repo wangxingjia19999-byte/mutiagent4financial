@@ -153,8 +153,85 @@ class Orchestrator:
         # Pipeline Context (Shared Memory)
         self.pipeline_context = {}
 
+        # ── Neo4j Memory Client (self-optimizing agent) ──
+        self._memory_client = None
+        try:
+            from agent_pools.memory.agent_memory_client import AgentMemoryClient
+            self._memory_client = AgentMemoryClient()
+            logger.info("Memory system connected — agent will learn from past trades")
+        except Exception as e:
+            logger.info("Memory system unavailable (%s) — running without learning", e)
+
         # Initialize Manager with Agent-as-Tool pattern
         self._initialize_manager_agent()
+
+    # ═══════════════════════════════════════════════════════════════
+    # Memory Helpers (Agent Self-Optimization)
+    # ═══════════════════════════════════════════════════════════════
+
+    def _recall_lessons(self, keywords: List[str]) -> List[str]:
+        """Query Neo4j for past lessons relevant to current context."""
+        if not self._memory_client:
+            return []
+        lessons = []
+        for kw in keywords:
+            try:
+                result = self._memory_client.retrieve_lessons_by_issue(kw)
+                if result:
+                    lessons.extend(result)
+            except Exception:
+                pass
+        return list(set(lessons))  # deduplicate
+
+    def _learn_from_cycle(self, strategy: str, outcome: str, metrics: Dict[str, Any]):
+        """Store a lesson from the current trading cycle into Neo4j memory."""
+        if not self._memory_client:
+            return
+        try:
+            sharpe = metrics.get('sharpe_ratio', 0)
+            ret = metrics.get('total_return', 0)
+            mdd = metrics.get('max_drawdown', 0)
+            regime = metrics.get('market_regime', 'unknown')
+            n_stocks = metrics.get('n_symbols', 0)
+
+            if sharpe > 1.0:
+                self._memory_client.store_reflection(
+                    agent_name="Orchestrator",
+                    strategy_name=strategy,
+                    issue=f"strong_performance_{regime}",
+                    lesson_learned=(
+                        f"Sharpe={sharpe:.2f} Return={ret:.2%} MDD={mdd:.2%} "
+                        f"on {n_stocks} stocks in {regime} regime. "
+                        f"Strategy works well in this market condition."
+                    ),
+                )
+            elif sharpe < -0.5:
+                self._memory_client.store_reflection(
+                    agent_name="Orchestrator",
+                    strategy_name=strategy,
+                    issue=f"poor_performance_{regime}",
+                    lesson_learned=(
+                        f"Sharpe={sharpe:.2f} Return={ret:.2%} MDD={mdd:.2%} "
+                        f"on {n_stocks} stocks in {regime} regime. "
+                        f"Consider reducing position size or switching factors."
+                    ),
+                )
+
+            if mdd < -0.05:
+                self._memory_client.store_reflection(
+                    agent_name="Orchestrator",
+                    strategy_name=strategy,
+                    issue="large_drawdown",
+                    lesson_learned=(
+                        f"MaxDrawdown={mdd:.2%} with Sharpe={sharpe:.2f}. "
+                        f"Add tighter stop-loss or reduce max positions below "
+                        f"{n_stocks} in {regime} conditions."
+                    ),
+                )
+
+            logger.info("Memory: stored %d lessons from this cycle", 3 if sharpe > 1 else 2 if mdd < -0.05 else 1)
+        except Exception as e:
+            logger.debug("Memory store failed (non-critical): %s", e)
 
     def _patch_agent_to_support_as_tool(self, agent_instance):
         """
@@ -565,6 +642,12 @@ class Orchestrator:
                 train_data = None
                 test_data = full_data
 
+            # 1b. Memory recall — query past lessons for current context
+            lessons = self._recall_lessons(["performance", "drawdown", "Sharpe", "regime", "factor", "strategy"])
+            if lessons:
+                logger.info("Memory: recalled %d past lessons for this cycle", len(lessons))
+                self.pipeline_context['past_lessons'] = lessons
+
             # 2. Alpha Generation — Alpha158 factors + LightGBM by default
             alpha_result = self.alpha_agent.generate_signals_from_data(
                 data=test_data,  # Predict on Test
@@ -635,6 +718,19 @@ class Orchestrator:
             backtest_result["market_regime"] = risk_result.get("market_regime", "unknown")
             backtest_result["risk_narrative"] = risk_result.get("risk_narrative", "")
             backtest_result["exit_candidates"] = portfolio_result.get("exit_candidates", [])
+
+            # 6. Memory: store lessons from this cycle for future self-optimization
+            self._learn_from_cycle(
+                strategy=f"{mode}_pipeline",
+                outcome="success" if backtest_result.get("status") != "error" else "error",
+                metrics={
+                    "sharpe_ratio": backtest_result.get("performance_metrics", {}).get("sharpe_ratio", 0),
+                    "total_return": backtest_result.get("performance_metrics", {}).get("total_return", 0),
+                    "max_drawdown": backtest_result.get("performance_metrics", {}).get("max_drawdown", 0),
+                    "market_regime": risk_result.get("market_regime", "unknown"),
+                    "n_symbols": len(symbols),
+                },
+            )
 
             return backtest_result
             
@@ -919,6 +1015,11 @@ class Orchestrator:
                 train_data = data.iloc[:-30] if len(data) > 30 else data
                 test_data = data.iloc[-30:] if len(data) > 30 else data
 
+            # 1b. Memory recall
+            lessons = self._recall_lessons(["performance", "drawdown", "Sharpe", "regime", "factor", "strategy"])
+            if lessons:
+                logger.info("Memory: recalled %d past lessons for live cycle", len(lessons))
+
             # 2. Alpha signals — Alpha158 factors + LightGBM by default
             alpha_result = self.alpha_agent.generate_signals_from_data(
                 data=test_data, train_data=train_data,
@@ -1031,6 +1132,19 @@ class Orchestrator:
 
             if journal:
                 journal.finish_cycle()
+
+            # Memory: store lessons from this live cycle
+            self._learn_from_cycle(
+                strategy="live_trading",
+                outcome="success",
+                metrics={
+                    "sharpe_ratio": 0,  # live cycle doesn't compute sharpe
+                    "total_return": 0,
+                    "max_drawdown": 0,
+                    "market_regime": risk_result.get("market_regime", "unknown"),
+                    "n_symbols": len(fetch_symbols),
+                },
+            )
 
             return {
                 "status": "success",
