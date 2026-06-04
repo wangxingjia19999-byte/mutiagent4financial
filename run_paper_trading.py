@@ -21,7 +21,7 @@ import os
 import warnings
 import logging
 import sys
-from typing import List
+from typing import Dict, List
 import time
 from datetime import datetime
 from pathlib import Path
@@ -323,6 +323,33 @@ def resolve_symbols(args) -> list:
     return symbols
 
 
+def _load_market_cap_cache() -> Dict[str, float]:
+    """Load market cap cache from disk (24h TTL). Returns {symbol: total_mv_cny}."""
+    import json
+    cache_path = Path(__file__).parent / "data" / "cache" / "market_cap_cache.json"
+    try:
+        if cache_path.exists():
+            data = json.loads(cache_path.read_text())
+            ts = data.get("timestamp", "")
+            if ts:
+                cache_time = datetime.fromisoformat(ts)
+                if (datetime.now() - cache_time).total_seconds() < 86400:  # 24h TTL
+                    return data.get("caps", {})
+    except Exception:
+        pass
+    return {}
+
+def _save_market_cap_cache(caps: Dict[str, float]):
+    """Save market cap data to disk cache."""
+    import json
+    cache_path = Path(__file__).parent / "data" / "cache" / "market_cap_cache.json"
+    try:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {"timestamp": datetime.now().isoformat(), "caps": caps}
+        cache_path.write_text(json.dumps(data, ensure_ascii=False))
+    except Exception:
+        pass
+
 def _apply_market_cap_filter(symbols: List[str], max_cap_yi: float, market: str) -> List[str]:
     """
     Filter symbols by market cap ≤ max_cap_yi (亿元).
@@ -339,8 +366,19 @@ def _apply_market_cap_filter(symbols: List[str], max_cap_yi: float, market: str)
 
 
 def _filter_cn_market_cap(symbols: List[str], max_cap_cny: float) -> List[str]:
-    """Filter CN stocks by market cap using akshare → Tushare → keep-all fallback."""
+    """Filter CN stocks by market cap using akshare → cache → Tushare → keep-all fallback."""
     max_cap_yi = max_cap_cny / 1e8
+
+    # ── Method 0: disk cache (24h TTL, avoids re-querying Tushare) ──
+    cache = _load_market_cap_cache()
+    cached = {s: mv for s, mv in cache.items() if s in symbols}
+    if len(cached) >= len(symbols) * 0.8:  # 80%+ hit rate → use cache
+        passed = [s for s, mv in cached.items() if 0 < mv <= max_cap_cny]
+        excluded = len(symbols) - len(passed)
+        avg_cap = sum(cached.values()) / len(cached) / 1e8 if cached else 0
+        print(f"  📏 Market cap ≤ {max_cap_yi:.0f}亿 (cached): "
+              f"{len(passed)} stocks kept (avg {avg_cap:.0f}亿, excluded {excluded})")
+        return passed
 
     # ── Method 1: akshare (free, has 总市值 in spot data) ──
     try:
@@ -382,13 +420,15 @@ def _filter_cn_market_cap(symbols: List[str], max_cap_cny: float) -> List[str]:
             passed = []
             total_mvs = []
             checked_count = 0
+            all_mv = {}  # collect all market caps for cache
             for i, sym in enumerate(symbols):
                 try:
                     df = pro.daily_basic(ts_code=sym, trade_date=today_str, fields="ts_code,total_mv")
                     if df is not None and not df.empty:
                         checked_count += 1
-                        mv_wan = float(df['total_mv'].iloc[0])  # 万元
-                        mv_cny = mv_wan * 1e4  # → 元
+                        mv_wan = float(df['total_mv'].iloc[0])
+                        mv_cny = mv_wan * 1e4
+                        all_mv[sym] = mv_cny  # save for cache
                         if 0 < mv_cny <= max_cap_cny:
                             passed.append(sym)
                             total_mvs.append(mv_cny)
@@ -400,8 +440,11 @@ def _filter_cn_market_cap(symbols: List[str], max_cap_cny: float) -> List[str]:
                         print(f"    ⚠️  Tushare query failed for {sym}: {e}")
                     continue
 
+            # Save to disk cache for next run (24h TTL)
+            if all_mv:
+                _save_market_cap_cache(all_mv)
+
             if checked_count > 0:
-                # Queries succeeded — report results even if 0 passed
                 excluded = len(symbols) - len(passed)
                 avg_cap = (sum(total_mvs) / len(total_mvs)) / 1e8 if total_mvs else 0
                 print(f"  📏 Market cap ≤ {max_cap_yi:.0f}亿 (via Tushare): "
@@ -571,6 +614,10 @@ def print_backtest_result(result):
     narrative = result.get("risk_narrative", "")
     if narrative:
         print(f"  📋 {narrative}")
+
+    memory_insight = result.get("memory_insight", "")
+    if memory_insight:
+        print(f"  🧠 记忆反馈: {memory_insight}")
 
     news_narrative = result.get("news_narrative", "")
     if news_narrative:

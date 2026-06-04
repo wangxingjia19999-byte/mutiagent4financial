@@ -38,12 +38,12 @@ class FullMarketScreener:
          - Low volatility preference
     """
 
-    # ── Hard filter thresholds ───────────────────────────────────
+    # ── Hard filter thresholds (tuned for small-cap coverage) ────
     MIN_LIST_DAYS = 60
     MIN_PRICE = 2.0
     MAX_PRICE = 3_000.0
-    MIN_VOLUME = 500_000       # min daily volume (shares)
-    MIN_AMOUNT = 5_000_000     # min daily turnover (¥5M)
+    MIN_VOLUME = 100_000       # min daily volume (shares) — relaxed for small caps
+    MIN_AMOUNT = 1_000_000     # min daily turnover (¥1M) — relaxed for small caps
     EXCLUDE_MARKETS = {"B股", "北交所"}
 
     # ── Factor weights ───────────────────────────────────────────

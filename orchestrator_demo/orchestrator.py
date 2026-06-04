@@ -228,6 +228,78 @@ class Orchestrator:
                 pass
         return list(set(lessons))  # deduplicate
 
+    def _apply_memory_insights(self, max_positions: int, total_capital: float) -> Tuple[int, float, str]:
+        """
+        Use recalled past lessons to adjust strategy parameters.
+        Returns (adjusted_max_positions, adjusted_capital, insight_summary).
+        """
+        lessons = self.pipeline_context.get('past_lessons', [])
+        if not lessons:
+            return max_positions, total_capital, ""
+
+        adjustments = []
+        new_max_pos = max_positions
+        new_capital = total_capital
+
+        # Parse lessons for actionable signals
+        sharpe_values = []
+        drawdown_values = []
+        regime_matches = 0
+
+        for lesson in lessons:
+            lesson_str = str(lesson)
+
+            # Extract Sharpe
+            if 'Sharpe=' in lesson_str:
+                try:
+                    sharpe_str = lesson_str.split('Sharpe=')[1].split()[0].rstrip(',.')
+                    sharpe_values.append(float(sharpe_str))
+                except (ValueError, IndexError):
+                    pass
+
+            # Extract drawdown
+            if 'MDD=' in lesson_str:
+                try:
+                    mdd_str = lesson_str.split('MDD=')[1].split('%')[0].split()[0].rstrip(',.')
+                    drawdown_values.append(abs(float(mdd_str)) / 100)
+                except (ValueError, IndexError):
+                    pass
+
+            # Check regime matches
+            if 'trending_bull' in lesson_str or 'trending_bear' in lesson_str:
+                regime_matches += 1
+
+        # ── Adjust positions based on past Sharpe ──
+        if sharpe_values:
+            avg_sharpe = sum(sharpe_values) / len(sharpe_values)
+            if avg_sharpe > 2.0:
+                # Strong past performance — maintain or expand
+                adjustments.append(f"历史Sharpe均值{avg_sharpe:.1f}优秀，维持仓位上限")
+            elif avg_sharpe < -0.5:
+                # Poor past performance — reduce positions
+                reduction = min(0.5, abs(avg_sharpe) / 5)
+                new_max_pos = max(5, int(max_positions * (1 - reduction)))
+                adjustments.append(f"历史Sharpe均值{avg_sharpe:.1f}较差，仓位上限 {max_positions}→{new_max_pos}")
+
+        # ── Adjust capital based on past drawdown ──
+        if drawdown_values:
+            avg_dd = sum(drawdown_values) / len(drawdown_values)
+            if avg_dd > 0.10:
+                # Large past drawdowns — reduce capital allocation
+                scale = max(0.5, 1.0 - avg_dd)
+                new_capital = total_capital * scale
+                adjustments.append(f"历史回撤均值{avg_dd:.1%}较大，资金缩放至{scale:.0%}")
+
+        # ── Regime-based adjustment ──
+        if regime_matches >= 3:
+            adjustments.append(f"匹配{regime_matches}条同市场状态经验，策略适配中")
+
+        insight = "。".join(adjustments) + "。" if adjustments else ""
+        if insight:
+            logger.info("Memory insights: %s", insight)
+
+        return new_max_pos, new_capital, insight
+
     def _learn_from_cycle(self, strategy: str, outcome: str, metrics: Dict[str, Any]):
         """Store a lesson from the current trading cycle into Neo4j memory."""
         if not self._memory_client:
@@ -690,11 +762,19 @@ class Orchestrator:
                 train_data = None
                 test_data = full_data
 
-            # 1b. Memory recall — query past lessons for current context
+            # 1b. Memory recall + apply insights
             lessons = self._recall_lessons(["performance", "drawdown", "Sharpe", "regime", "factor", "strategy"])
             if lessons:
                 logger.info("Memory: recalled %d past lessons for this cycle", len(lessons))
                 self.pipeline_context['past_lessons'] = lessons
+                # Apply memory insights to adjust strategy
+                adj_positions, adj_capital, memory_insight = self._apply_memory_insights(
+                    max_positions, total_capital
+                )
+                if memory_insight:
+                    self.pipeline_context['memory_insight'] = memory_insight
+                    max_positions = adj_positions
+                    total_capital = adj_capital
 
             # 1c. News sentiment — analyze recent news for candidate stocks
             news_sentiment = {}
@@ -793,6 +873,7 @@ class Orchestrator:
             backtest_result["exit_candidates"] = portfolio_result.get("exit_candidates", [])
             backtest_result["news_narrative"] = self.pipeline_context.get("news_narrative", "")
             backtest_result["news_sector_impact"] = self.pipeline_context.get("news_sector_impact", {})
+            backtest_result["memory_insight"] = self.pipeline_context.get("memory_insight", "")
 
             # 6. Memory: store lessons from this cycle for future self-optimization
             self._learn_from_cycle(
